@@ -303,17 +303,26 @@ does not hold. This is the failure mode consensus exists to make impossible.
 
 ---
 
-## 3. WAL backpressure rejects replication, and the follower never catches up
+## 3. WAL backpressure rejects replication instead of pushing back
 
-**Status:** **partially fixed. The exception escape and the log amplification
-are gone; the livelock is not.**
+**Status:** **fixed** in Kommander `985f017` and `6eb2a09`; the fix is sound but
+has not recurred often enough since to call it verified under load.
 **Found on:** Kommander `f1658ba`, suite `698c48b`.
 **Workload:** `log-append`; observed under `partition`, `kill` and
 `partition,kill`.
-**Runs:** GitHub Actions [31709747704] (reported), [31731331616] (after the
-partial fix).
+**Runs:** GitHub Actions [31709747704] (reported), [31731331616] (after the first
+fix), [31747187466] (condition absent).
 
-### Partial resolution, and what it did not do
+> **Correction.** This entry was originally titled "…and the follower never
+> catches up", and treated the backpressure storm as the cause of replicas that
+> stopped advancing. **That causal claim was wrong.** Run [31747187466] halved
+> the offered load, eliminated the WAL pressure entirely — 316 slow AppendLogs
+> dispatches to zero, on every node — and the replicas still did not advance. The
+> non-convergence is finding 5, and is unrelated to anything below. What remains
+> here is a real defect that is really fixed; it just never explained the symptom
+> it was filed under.
+
+### Resolution
 
 A follower's WAL enqueue could throw `BackpressureExceededException` out of
 `AppendLogsCoreAsync` with nothing catching it anywhere in the replication path.
@@ -333,39 +342,26 @@ Measured in [31731331616], both of those worked:
 | escaped `BackpressureExceededException` | 237,976 / 13,054 / 2,226 (n1/n5/n3) | **0 on every node** |
 | largest node log | 251 MB | 43 MB |
 
-**But the follower still never catches up.** All three `log-append` jobs again
-exhausted the deadline with `:converged? false`, and every lagging entry
-reported `:advanced 0` — no replica moved a single index in ~180 s of healed,
-idle cluster across 46–90 polls.
+That first fix answered the leader but did not make it *act* on the answer. Over
+[31731331616] n2 logged 15,484 `FollowerWalSaturated` acks and n3 9,478, peaking
+at **2,365 in one second** against a 500 ms `HeartbeatInterval` that should cap
+the leader near 32/s — and the rate *rose* through the quiescent recovery phase
+(1,018 → 5,378 → 7,853 per minute while idle). An exception storm had become a
+status storm: a typed status is only backpressure if the sender acts on it.
 
-The reason is a prediction in the fix that turned out to be wrong. It assumed
-that because `CompleteAppendLogsAsync` returns on a non-`Success` status before
-touching `matchIndex`/`nextIndex`, the re-send would fall back to the ordinary
-heartbeat/backfill cadence. It does not. Over the run n2 logged 15,484
-`FollowerWalSaturated` acks and n3 9,478, peaking at **2,365 in a single second**
-(18:40:56) against a 500 ms `HeartbeatInterval` that should cap the leader at
-roughly 32/s across four partitions and four peers. The exception storm became a
-status storm.
+Kommander `6eb2a09` adds `RaftConfiguration.FollowerSaturationBackoff` (1 s) and
+a per-peer cooldown in `TrySendBackfillBatchAsync`. The gate sits at that single
+choke point rather than on a timer because the storm was driven by *election
+churn* — every `BecomeLeaderAsync` forces a heartbeat — so a throttle attached to
+the heartbeat interval would not have caught it.
 
-The damning part is *when*. The recovery phase — network healed, nemesis
-stopped, no client load — ran 18:38:41 → 18:41:42, and n2's ack rate **rose**
-through it:
+The condition has not recurred at scale since, so the cooldown is unproven in
+anger rather than demonstrated. Worth watching for `FollowerWalSaturated` volume
+in future runs.
 
-| minute | phase | acks |
-|---|---|---|
-| 18:36 | under load | 1,235 |
-| 18:39 | quiescent recovery | 1,018 |
-| 18:40 | quiescent recovery | 5,378 |
-| 18:41 | quiescent recovery | 7,853 |
-
-An idle cluster accelerating its own retries is a spin, not a workload.
-
-The remaining fix is leader-side: a per-peer cooldown suppressing re-sends to a
-saturated peer for an interval. A typed status is only backpressure if the
-sender acts on it, and nothing on the leader currently does.
-
-Not addressed either: the load skew. n1 took 237,976 rejections on partition 4
-while n2 and n4 took none, which a fair scheduler should not produce.
+Not addressed: the load skew. n1 took 237,976 rejections on partition 4 while n2
+and n4 took none, which a fair scheduler should not produce and which nothing
+above explains.
 
 ### The original report follows.
 
@@ -395,26 +391,18 @@ Counts for the `partition` job, whole run:
 | n2 | 0 | — | — |
 | n4 | 0 | — | — |
 
-### Why this is not lag
+Rejections continued *inside* the quiescent recovery phase
+(14:26:41.994 → 14:29:44.909, network healed, nemesis stopped, no client load) —
+n3 and n5 were still throwing on partition 1 at 14:29:39 and 14:29:58. So the
+condition itself is real and outlives the workload that caused it; a replication
+path that refuses its leader's entries is a defect regardless of what else is
+going on.
 
-The recovery phase ran **14:26:41.994 → 14:29:44.909** — 182.966 s, 63 polls,
-with the network healed, the nemesis stopped and no client load. n3 and n5 were
-still throwing this *inside that window*, on partition 1, and the wait ended
-with 12 node/partitions short of the acknowledged high-water mark
-(`:converged? false`, `:missing []` — every node answering, none advancing).
-
-This is what the convergence wait was built to distinguish, and it is the
-distinction that matters: the replicas were not slow, they were stuck. No value
-of `--recovery-time` fixes a queue that rejects writes. The three red
-`log-append` jobs in this run all carry `:converged? false`; the one that
-passed, `membership`, is the one whose earlier failure genuinely *was* lag.
+What that section originally went on to conclude — that this was *why* the
+replicas were not advancing — is the part run [31747187466] disproved. See the
+correction at the top of this entry.
 
 ### What is not established
-
-Whether the leader retries a rejected `AppendLogs` indefinitely, and therefore
-whether a follower in this state recovers once load stops. The evidence says it
-had not recovered after three minutes of quiescence; it does not say it never
-would.
 
 Whether the queue bound is simply too low for a 5-node cluster on a contended
 CI runner, or whether reject-on-full is the wrong policy for a replication
@@ -437,26 +425,39 @@ quietly wrong.
 
 ## 4. Two different entries committed at the same log index (Log Matching violation)
 
-**Status:** **open.** One occurrence.
-**Found on:** Kommander `985f017`, suite `7b4a8e4`.
-**Workload:** `log-append`, `--faults partition,kill`.
-**Run:** GitHub Actions [31731331616], job `log-append / partition,kill`,
-artifact `jepsen-log-append-6-1`.
+**Status:** **open. Two occurrences, and the second is worse than the first.**
+**Found on:** Kommander `985f017` and `6eb2a09`; suite `7b4a8e4` and `39fe62a`.
+**Workload:** `log-append`, under `partition,kill` and `kill`.
+**Runs:** GitHub Actions [31731331616] (artifact `jepsen-log-append-6-1`) and
+[31750742525].
 
 ### What happens
 
-Partition 2, index 104, at the final read:
+Two replicas hold different entries at the same index at the final read.
+
+**First occurrence** — [31731331616], partition 2, index 104:
 
 ```clojure
-:diverged [{:index 104,
-            :values {"n1" "v5174", "n2" "v5174", "n5" "v5174", "n3" "v6067"},
-            :partition 2}]
+:values {"n1" "v5174", "n2" "v5174", "n5" "v5174", "n3" "v6067"}
 ```
 
-Four replicas hold `v5174` at p2/104. n3 holds `v6067` there. This is the Log
-Matching Property stated directly — *if two logs contain an entry with the same
-index and term, the logs are identical in all entries up through that index* —
-and it is the property backfill and the snapshot handoff exist to preserve.
+Four replicas agree; n3 dissents.
+
+**Second occurrence** — [31750742525], partition 2, index 57:
+
+```clojure
+:values {"n1" "v2752", "n2" "v2752", "n3" "v1720", "n4" "v1720"}
+```
+
+**A two-two split with no majority.** The first occurrence had a clear majority
+view and one divergent replica, which at least leaves an obvious repair target.
+This one does not: two entries each sit on two replicas, and nothing in the
+applied state says which is the committed one.
+
+This is the Log Matching Property stated directly — *if two logs contain an entry
+with the same index and term, the logs are identical in all entries up through
+that index* — and it is the property backfill and the snapshot handoff exist to
+preserve.
 
 Run verdict: `:diverged` as above, `:holes 6`, `:tail-losses 152`,
 `:acked-count 412`, `:duplicated []`, `:redelivered []`, `:undecodable []`.
@@ -490,13 +491,144 @@ partition's replication) and is the first thing to check.
 
 ### What is not established
 
-**Which entry is the legitimate one.** `v5174` has the majority, but this suite
-records what each replica applied, not which one Raft would consider committed.
-Establishing that needs the term at index 104 on each node, which the harness
-does not currently expose — it serves `{:index :value}` only. Adding the term to
-`/log/entries` would make this decidable and is a cheap change to this repo.
+**Which entry is the legitimate one.** In the first occurrence `v5174` at least
+had the majority; in the second there is no majority at all. This suite records
+what each replica *applied*, not which entry Raft would consider committed, and
+that is not enough to adjudicate a two-two split. Deciding it needs the term at
+each index per node, which the harness does not expose — `/log/entries` serves
+`{:index :value}`. Adding the term is a cheap change to this repo and is now the
+prerequisite for any further work on this entry.
 
-**Whether it reproduces.** One occurrence, one run.
+**Whether the two occurrences share a mechanism.** Both are partition 2, which is
+suggestive and nothing more.
+
+---
+
+## 5. Committed entries are never delivered to the state machine
+
+**Status:** **fix written and unit-reproduced; not yet verified under load.**
+Confirmed as the cause of the non-convergence that findings 3 and 4 were each
+wrongly blamed for in earlier drafts.
+**Found on:** Kommander `6eb2a09`, suite `39fe62a`.
+**Workload:** `log-append`; observed under every fault profile, including
+`membership`.
+**Run:** GitHub Actions [31750742525].
+
+### Resolution
+
+`DrainCommittedAppliesAsync` withholds — correctly — when the next expected id is
+absent above the snapshot floor or is still `Proposed`; delivering past either
+would skip an entry permanently. Its docstring called this routine on a follower
+"because the leader's re-ship/backfill retries the drain".
+
+It does not. The drain has exactly three call sites and only one is reachable on
+a follower: the WAL-write-completion handler. So a drain retries only when
+another write lands — and writes stop arriving precisely when the follower's
+*commit* index catches up, which happens whether or not anything was applied.
+From then on the leader sends empty heartbeats, which carry no logs, enqueue no
+write and complete nothing. The blocking condition clears with nothing left to
+notice it.
+
+The fix retries the drain from `CheckPartitionLeadershipAsync`, the periodic
+tick, whenever the commit frontier leads the applied frontier. That method
+already carries a comment observing that "a stable follower whose apply stalls
+has no leadership-loss transition… the tick is the only bound on their wait" —
+the same conclusion, reached about read-index waiters, one stall short of this
+one.
+
+Leaders are excluded: their mid-tenure delivery goes through
+`CompleteLeaderCommit` and the deferred-applies buffer, and a second drain racing
+that is how finding 1's hole was produced.
+
+Reproduced deterministically in `TestFollowerDeliveryStall`, which drives the
+real follower path — `AppendLogsAsync` → WAL completion → withheld drain — then
+resolves the blocking entry and delivers only ticks. Two controls bracket it: one
+that delivery is immediate when nothing is withheld, one that a still-blocked
+drain stays blocked, so the red test cannot be satisfied by draining
+indiscriminately.
+
+**Not yet verified under load.** The unit reproduction is exact, but no Jepsen
+run has exercised the fix.
+
+### What happens
+
+Entries replicate to a node, are held in its log, and are never handed to the
+consumer. Jepsen reads the consumer's view, so they appear lost — while the
+leader, reading commit indexes, correctly sees nothing to send.
+
+Every loss in [31750742525] is of this kind:
+
+| job | tail-losses | holes | **undelivered** |
+|---|---|---|---|
+| partition,kill | 152 | 0 | **152** |
+| partition | 348 | 0 | **347** |
+| membership | 227 | 0 | **227** |
+| kill | 159 | 4 | **163** (spans both) |
+
+`:delivery` shows the size of the gap per node/partition:
+
+```clojure
+{:node "n3" :partition 1 :applied 0   :log 74  :behind 74}
+{:node "n3" :partition 1 :applied 207 :log 325 :behind 118}
+{:node "n2" :partition 3 :applied 227 :log 329 :behind 102}
+{:node "n2" :partition 4 :applied 215 :log 340 :behind 125}
+```
+
+`applied=0, log=74` is the shape worth starting from: not a replica drifting
+behind under load, but one that delivered **nothing at all** for a partition
+whose log had 74 entries.
+
+### Why this took five rounds to find
+
+Because applied entries alone cannot distinguish "never arrived" from "arrived
+and was never handed over", and the two point at opposite subsystems. Four
+consecutive investigations — recovery-time tuning, WAL backpressure, backfill
+frontier seeding, executor capacity — each found a real defect in the
+replication path, fixed it, and did not move `:advanced` one index, because
+there was never a replication gap to close.
+
+The distinguishing evidence was available the whole time and simply not
+collected. Suite `39fe62a` adds `logIndex` to `/log/entries` and the
+`:undelivered` / `:delivery` fields to the verdict; the very next run classified
+all 889 losses in one line. **The lesson is about instrumentation, not about
+Raft:** when a symptom survives several plausible fixes, the next move is to
+make the symptom self-classifying rather than to try a fifth cause.
+
+### Why this is not the test's fault
+
+* **Not undecodable payloads.** `:undecodable []` and every loss is
+  `:harness-dropped false` — the harness was never handed these entries.
+* **Not a replication gap.** The node's own log reaches at or past every missing
+  index; that is what `:undelivered? true` means.
+* **Not the leader failing to send.** Its `DIAG backfill-decision` trace shows
+  `gap=0` computed from commit indexes the follower itself reported — the leader
+  is correct that replication is complete.
+* **Not lag.** `:converged? false` with `:advanced 0` across 53–91 polls of a
+  healed, idle cluster.
+
+### What is not established
+
+**Where delivery stops.** `DrainCommittedAppliesAsync` runs when
+`committedIndex > lastAppliedIndex`, so the drain is reached; why it does not
+drain is unknown. `applied=0` suggests it can fail from the first entry rather
+than drift, which should make it far easier to reproduce than anything else in
+this file.
+
+**Whether it is one bug or several.** `applied=0 log=74` and
+`applied=227 log=329` may not share a cause.
+
+**Its relationship to finding 1.** That was the same family — a node not applying
+its own committed entries — fixed for *leaders* in `f1658ba`. Whether this is the
+follower-side counterpart of the same defect or an unrelated one is open.
+
+### Why it matters
+
+A committed entry that never reaches the state machine is invisible to every
+client reading through it, on a node that reports itself healthy and caught up.
+The leader's own accounting agrees it is caught up, because by Raft's definition
+it is. Nothing in the cluster is in a position to notice.
 
 [31709747704]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31709747704
 [31731331616]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31731331616
+[31747187466]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31747187466
+[31750742525]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31750742525
