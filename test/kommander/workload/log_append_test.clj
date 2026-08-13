@@ -172,6 +172,95 @@
       (is (true? (:valid? r)))
       (is (empty? (:undecodable r))))))
 
+;; ---------------------------------------------------------------------------
+;; The recovery wait
+;; ---------------------------------------------------------------------------
+
+(deftest lagging-is-empty-once-every-node-reaches-the-high-water-mark
+  (is (empty? (la/lagging {1 9} {"n1" {1 9} "n2" {1 12}}))))
+
+(deftest lagging-names-the-node-and-how-far-behind-it-is
+  (is (= [{:node "n2" :partition 1 :frontier 4 :needs 9}]
+         (la/lagging {1 9} {"n1" {1 9} "n2" {1 4}}))))
+
+(deftest agreeing-frontiers-are-not-enough
+  (testing "the condition is catching up, not agreeing: five replicas can agree
+            perfectly and still all sit below the acknowledged high-water mark,
+            which is precisely the run where every node reports the same
+            missing tail. A wait that stopped at agreement would stop there"
+    (is (seq (la/lagging {1 40} {"n1" {1 30} "n2" {1 30} "n3" {1 30}})))))
+
+(deftest a-partition-a-node-did-not-answer-for-holds-the-wait-open
+  (testing "an unanswered partition is not a caught-up one; treating absence as
+            satisfied would let the read proceed against a node that might yet
+            have answered"
+    (is (= [{:node "n1" :partition 2 :frontier nil :needs 5}]
+           (la/lagging {1 9, 2 5} {"n1" {1 9}})))))
+
+(deftest a-node-with-nothing-applied-does-hold-the-wait-open
+  (testing "frontier 0 is a re-joined Learner mid-backfill — the case the wait
+            exists for, and the one a frontier of 'absent' must not be confused
+            with"
+    (is (= [{:node "n1" :partition 1 :frontier 0 :needs 9}]
+           (la/lagging {1 9} {"n1" {1 0}})))))
+
+(deftest nothing-acknowledged-means-nothing-to-wait-for
+  (testing "a run the kill nemesis flattened acknowledges nothing and is headed
+            for :insufficient-data — there is no point sleeping through it"
+    (is (empty? (la/lagging {} {"n1" {1 0} "n2" {1 0}})))))
+
+(deftest a-silent-node-is-waited-for
+  (testing "it cannot produce a false violation — the checker skips it — but a
+            node still replaying its WAL after a kill is one more replica to
+            compare against, and four is a weaker check than five"
+    (is (= ["n3"] (la/missing-nodes ["n1" "n2" "n3"] {"n1" {1 9} "n2" {1 9}})))
+    (is (empty? (la/missing-nodes ["n1" "n2"] {"n1" {1 9} "n2" {1 9}})))))
+
+(deftest await-returns-as-soon-as-the-cluster-catches-up
+  (testing "the point of polling: a healthy cluster must not pay the deadline"
+    (let [polls  (atom 0)
+          poll!  (fn [] (swap! polls inc)
+                        (if (< @polls 3) {"n1" {1 2}} {"n1" {1 9}}))
+          r      (la/await-convergence! poll! ["n1"] {1 9}
+                                        {:recovery-time 60 :poll-interval 0})]
+      (is (true? (:converged? r)))
+      (is (= 3 (:polls r)))
+      (is (empty? (:lagging r)))
+      (is (empty? (:missing r))))))
+
+(deftest await-waits-for-a-node-that-is-not-answering-yet
+  (testing "caught up is not enough while a replica is still coming back"
+    (let [polls (atom 0)
+          poll! (fn [] (swap! polls inc)
+                       (if (< @polls 4) {"n1" {1 9}} {"n1" {1 9} "n2" {1 9}}))
+          r     (la/await-convergence! poll! ["n1" "n2"] {1 9}
+                                       {:recovery-time 60 :poll-interval 0})]
+      (is (true? (:converged? r)))
+      (is (= 4 (:polls r))))))
+
+(deftest await-gives-up-at-the-deadline-and-says-so
+  (testing "a wait that timed out must be distinguishable from one that
+            succeeded, or the tail losses that follow cannot be read"
+    (let [r (la/await-convergence! (constantly {"n1" {1 2}}) ["n1" "n2"] {1 9}
+                                   {:recovery-time 0 :poll-interval 0})]
+      (is (false? (:converged? r)))
+      (is (= [{:node "n1" :partition 1 :frontier 2 :needs 9}] (:lagging r)))
+      (is (= ["n2"] (:missing r))))))
+
+(deftest the-verdict-records-whether-the-wait-converged
+  (testing "reported, but never decisive: :convergence must not turn a clean
+            run red, and must not turn a violation green"
+    (let [conv  {:converged? false :waited-ms 90000 :polls 45 :lagging []}
+          clean (la/check-logs acked {"n1" clean-node}
+                               (assoc opts :convergence conv))
+          dirty (la/check-logs acked {"n1" (node-state [[3 "v1"] [9 "v3"]])}
+                               (assoc opts :convergence
+                                      {:converged? true :waited-ms 12 :polls 2}))]
+      (is (true? (:valid? clean)))
+      (is (= conv (:convergence clean)))
+      (is (false? (:valid? dirty)))
+      (is (true? (:converged? (:convergence dirty)))))))
+
 (deftest violations-are-found-across-partitions
   (testing "each partition is an independent Raft group; a divergence in one
             must not be masked by another being clean"

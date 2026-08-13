@@ -68,7 +68,8 @@ for:
 | `--concurrency` | total client threads; **must** be an exact multiple of `--concurrency-per-key` |
 | `--rate` | requests/sec per client |
 | `--time-limit` | seconds of load |
-| `--recovery-time` | seconds to wait after healing before the final read |
+| `--recovery-time` | deadline (seconds) on the wait for replicas to catch up after healing; the wait ends as soon as they do |
+| `--poll-interval` | seconds between frontier polls during that wait |
 | `--disable-wal-sync-writes` | run without WAL fsync (expect data loss on kill) |
 
 Run `lein test` for the unit tests — negative controls proving the log-append
@@ -98,8 +99,12 @@ mean different things:
 - `:holes` — an acknowledged entry is missing at an index the node has already
   applied past. Waiting longer cannot fix it. This is a finding.
 - `:tail-losses` — the loss is beyond the node's applied frontier, which is also
-  what an un-caught-up replica looks like. Raise `--recovery-time` and rerun
-  before concluding anything.
+  what an un-caught-up replica looks like. Read it against `:convergence` in the
+  same verdict: `:converged? true` means every node had caught up to the
+  acknowledged high-water mark before the read, so the entries really are
+  missing; `:converged? false` means the wait hit `--recovery-time` with the
+  nodes in `:lagging`/`:missing` still behind, and the count proves nothing.
+  Raise `--recovery-time` and rerun.
 - `:undecodable` / `:harness-dropped` — the harness was handed the entry and
   refused it. That is a bug in **this repo**, not in Kommander.
 

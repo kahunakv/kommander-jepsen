@@ -38,6 +38,22 @@
   independent Raft group. There is no global order to violate, so nothing here
   compares indices between partitions.
 
+  ## Why the final read waits for a condition, not a duration
+
+  Every property above is read off the replicas *after* the faults stop, so all
+  of them are hostage to when that read is taken. Take it while a node is still
+  catching up and the checker sees the entries it has not got to yet as lost —
+  a fabricated durability violation whose only cause is impatience.
+
+  A fixed sleep can only be tuned against a machine. `await-convergence!`
+  instead polls until every reporting node's applied frontier has reached the
+  highest index the cluster acknowledged for that partition, which is the exact
+  point at which a *tail* loss stops being possible: past it, a missing
+  acknowledged entry is necessarily a hole. `--recovery-time` becomes the
+  deadline on that wait rather than its duration, and a run that hits the
+  deadline says so in `:convergence`, so a tail loss can be read as proven or
+  unproven instead of guessed at.
+
   ## Why an empty run is :unknown, not clean
 
   All four properties are trivially satisfied by a history in which nothing was
@@ -51,6 +67,64 @@
                     [generator :as gen]]
             [kommander.client :as kc]
             [slingshot.slingshot :refer [try+]]))
+
+;; ---------------------------------------------------------------------------
+;; Applied frontier — shared by the checker and the recovery wait
+;; ---------------------------------------------------------------------------
+
+(defn max-index
+  "Highest index in `indices`, or 0 for nothing applied.
+
+  This is a node's applied *frontier*, and it is defined once because two
+  places depend on meaning the same thing by it: the checker, which uses it to
+  tell a hole from a truncated tail, and the recovery wait, which uses it to
+  decide when the final read may be taken. A wait measured on some other
+  quantity would not be a wait for the condition the verdict turns on."
+  [indices]
+  (reduce max 0 indices))
+
+(defn lagging
+  "Node/partitions that have not applied as far as the cluster acknowledged.
+
+  `high-water` — {partition highest-acknowledged-index}
+  `frontiers`  — {node {partition frontier}}, holding only the partitions each
+                 node answered for
+
+  Returns `[{:node :partition :frontier :needs} …]`, empty when every node that
+  answered has caught up on every partition. A partition the node did not
+  answer for counts as behind, with `:frontier nil`.
+
+  Empty is the interesting state, because of what it rules out. If every
+  acknowledged index sits at or below every node's frontier, then an
+  acknowledged entry that is *missing* is missing from a position the node has
+  already moved past — a hole, which no amount of further waiting would fill.
+  So once this is empty the final read cannot produce a tail loss, and the
+  ambiguity that makes a tail loss uninterpretable is gone rather than merely
+  unlikely.
+
+  Note this is a stronger condition than the frontiers simply agreeing with
+  each other: five replicas can agree perfectly and still all sit below the
+  high-water mark, which is exactly the run where every node reports the same
+  missing tail. Agreement is not catching up."
+  [high-water frontiers]
+  (vec (for [[node ps]  frontiers
+             [p needs]  high-water
+             :let       [f (get ps p)]
+             :when      (or (nil? f) (< f needs))]
+         {:node node :partition p :frontier f :needs needs})))
+
+(defn missing-nodes
+  "Expected nodes that did not answer the poll at all.
+
+  These hold the wait open too, which is worth being deliberate about. The
+  checker cannot attribute a loss to a node that never answered, so a silent
+  node is not a *risk* of a false violation — waiting on it buys no safety. It
+  buys evidence: a node still replaying its WAL after a kill is one this run
+  would otherwise never compare against, and a check across four replicas is
+  weaker than one across five. The deadline bounds what that costs, and the
+  worst case is the fixed sleep this replaced."
+  [nodes frontiers]
+  (vec (remove (set (keys frontiers)) nodes)))
 
 ;; ---------------------------------------------------------------------------
 ;; Checker — pure, so test/ can feed it violations directly
@@ -135,8 +209,7 @@
         ;; Highest index a node has applied for a partition, or 0. The boundary
         ;; between "never applied this" and "has not got here yet".
         frontier     (fn [node p]
-                       (let [m (get-in by-partition [p node])]
-                         (if (seq m) (apply max (keys m)) 0)))
+                       (max-index (keys (get-in by-partition [p node]))))
 
         lost         (vec (for [{:keys [partition index value]} acked
                                 node reporting
@@ -183,6 +256,16 @@
         summary      {:acked-count      (count acked)
                       :nodes-reporting  reporting
                       :partitions       (vec partitions)
+                      ;; Context, not a verdict — deliberately outside the
+                      ;; emptiness check below. `{:converged? true}` says every
+                      ;; reporting node had caught up to the acknowledged
+                      ;; high-water mark before the final read, which is what
+                      ;; makes a `:tail-losses` count below interpretable: with
+                      ;; it, a tail loss is a real missing entry; without it,
+                      ;; the run timed out waiting and a tail loss may be
+                      ;; nothing but a slow replica. Absent for a run that did
+                      ;; not wait at all.
+                      :convergence      (:convergence opts)
                       :diverged         diverged
                       :lost             lost
                       ;; Split out because the two demand different responses: a
@@ -226,13 +309,94 @@
                        (map :value)
                        (map #(select-keys % [:partition :index :value]))
                        vec)
+            ;; One per run, from the recovery phase. Reported, never used to
+            ;; decide :valid? — see the note on :convergence in the summary.
+            conv  (->> ops
+                       (filter #(and (= :ok (:type %))
+                                     (= :await-convergence (:f %))))
+                       (map :value)
+                       first)
             nodes (->> ops
                        (filter #(and (= :ok (:type %)) (= :read-log (:f %))))
                        (map :value)
                        (reduce (fn [acc {:keys [node partitions]}]
                                  (assoc acc node partitions))
                                {}))]
-        (check-logs acked nodes opts)))))
+        (check-logs acked nodes (assoc opts :convergence conv))))))
+
+;; ---------------------------------------------------------------------------
+;; Recovery wait — poll until the replicas have caught up, not for a fixed time
+;; ---------------------------------------------------------------------------
+
+(defn await-convergence!
+  "Blocks until nothing is `lagging`, or the deadline passes.
+
+  `poll!` is a thunk returning {node {partition frontier}}; injected rather
+  than called directly so the loop can be tested without a cluster.
+
+  Converged means every expected node answered *and* every one of them has
+  caught up. Returns {:converged? :waited-ms :polls :lagging :missing}, which
+  goes into the history and from there into the verdict. `:converged? false` is
+  not itself a failure — it is the statement that the run ran out of patience,
+  and therefore that any tail loss reported afterwards is unproven.
+
+  Timing is `nanoTime`, not `currentTimeMillis`: :clock is an available fault,
+  and a deadline that a settimeofday can jump past would abandon the wait at
+  the one moment it matters most."
+  [poll! nodes high-water {:keys [recovery-time poll-interval]
+                           :or   {recovery-time 90, poll-interval 2}}]
+  (let [started  (System/nanoTime)
+        deadline (+ started (* recovery-time 1000000000))
+        elapsed  #(quot (- (System/nanoTime) started) 1000000)]
+    (loop [polls 1]
+      (let [fr      (poll!)
+            lag     (lagging high-water fr)
+            missing (missing-nodes nodes fr)]
+        (cond
+          (and (empty? lag) (empty? missing))
+          (do (info "replicas converged after" (elapsed) "ms," polls "polls")
+              {:converged? true :waited-ms (elapsed) :polls polls
+               :lagging [] :missing []})
+
+          (<= deadline (System/nanoTime))
+          (do (info "recovery deadline reached;" (count lag)
+                    "node/partitions still behind:" lag
+                    "| nodes not answering:" missing)
+              {:converged? false :waited-ms (elapsed) :polls polls
+               :lagging lag :missing missing})
+
+          :else
+          ;; Coerced, not merely computed: --poll-interval parses with
+          ;; read-string, so a fractional second arrives as a Double and
+          ;; Thread/sleep has no double overload to receive it.
+          (do (Thread/sleep (long (* poll-interval 1000)))
+              (recur (inc polls))))))))
+
+(defn poll-frontiers
+  "Reads every node's applied frontier for every partition.
+
+  Reuses `/log/entries` — the very endpoint the final read uses — so the wait
+  is measured on the same data the checker will consume. A dedicated
+  frontier-only endpoint would be cheaper, but it would also be a second code
+  path that could disagree with the first, and a wait that agrees with the
+  check matters more here than a few hundred KB per poll.
+
+  A node that cannot be reached is omitted, which `missing-nodes` then treats
+  as not-yet-converged. This is the rare place a bare `Exception` catch is
+  right: every transport failure means the same thing to this loop — no
+  frontier from that node this round — and a wait that propagated them would be
+  defeated by the very faults it exists to recover from."
+  [nodes partitions]
+  (into {}
+        (for [node nodes
+              :let [ps (into {}
+                             (for [p partitions
+                                   :let [r (try (kc/log-entries node p {:timeout 10000})
+                                                (catch Exception _ nil))]
+                                   :when (= "ok" (:status r))]
+                               [p (max-index (map :index (:entries r)))]))]
+              :when (seq ps)]
+          [node ps])))
 
 ;; ---------------------------------------------------------------------------
 ;; Client
@@ -253,24 +417,40 @@
      (catch java.io.IOException e#
        (assoc ~op :type :info, :error [:io (.getMessage e#)]))))
 
-(defrecord LogClient [node partitions]
+;; `acked` is the highest index the cluster confirmed per partition, shared by
+;; every client thread. The recovery wait needs it and only the clients see it:
+;; an acknowledgement exists in the response to an append and nowhere else
+;; until the history is checked, which is far too late to wait on.
+(defrecord LogClient [node partitions acked opts]
   client/Client
   (open! [this _test n]
     (assoc this :node n))
 
   (setup! [_ _test])
 
-  (invoke! [_ _test op]
+  (invoke! [_ test op]
     (with-errors op
       (case (:f op)
         :append
         (let [{:keys [partition value]} (:value op)
               r (kc/log-append! node partition value {:timeout 5000})]
           (if (= "ok" (:status r))
-            (assoc op :type :ok
-                      :value {:partition partition :value value :index (:index r)})
+            (do (swap! acked update partition (fnil max 0) (:index r))
+                (assoc op :type :ok
+                          :value {:partition partition :value value :index (:index r)}))
             (assoc op :type (kc/response-class (:status r))
                       :error (:status r))))
+
+        ;; Not a workload operation — the recovery wait, run as an op so that
+        ;; it happens on a worker thread, is ordered before the final reads by
+        ;; gen/phases, and lands in the history where the verdict and anyone
+        ;; reading the store can see how long convergence actually took.
+        :await-convergence
+        (assoc op :type :ok
+                  :value (await-convergence! #(poll-frontiers (:nodes test) partitions)
+                                             (:nodes test)
+                                             @acked
+                                             opts))
 
         :read-log
         ;; Read every partition from *this* client's node. Each client is bound
@@ -323,9 +503,14 @@
         ;; for replicated system configuration and rejects client proposals.
         partitions (vec (range 1 (inc (:partitions opts 4))))]
     (info "log-append over partitions" partitions)
-    {:client          (LogClient. nil partitions)
+    {:client          (LogClient. nil partitions (atom {}) opts)
      :checker         (checker opts)
      :generator       (appends partitions)
+     ;; Runs after the nemesis has healed and before the final read. Only this
+     ;; workload has one: the register workload compares client-observed
+     ;; operations rather than replicas, so replica catch-up cannot affect its
+     ;; verdict and waiting for it would be dead time.
+     :await-generator (gen/once {:type :invoke, :f :await-convergence, :value nil})
      ;; One final read per *thread*, after the cluster has healed. Threads are
      ;; bound to nodes round-robin, so this is the only shape that guarantees
      ;; every node is asked; `gen/once` would produce a single read from a

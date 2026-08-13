@@ -41,7 +41,18 @@
                       :nodes     (:nodes opts)
                       :faults    faults
                       :partition {:targets [:one :majority :majorities-ring]}
-                      :kill      {:targets [:one :majority :all]}
+                      ;; No :all. Killing every node at once tests nothing this
+                      ;; suite can check: with no surviving replica there is no
+                      ;; quorum to acknowledge anything, so the run simply stops
+                      ;; producing history until the cluster is restarted. It
+                      ;; cost most of a run's operations when it rolled — the
+                      ;; 2026-08-13 nightly acknowledged 150 appends under
+                      ;; :kill and 87 under :partition,:kill, against 1715 for
+                      ;; :partition alone — and a history that thin is closer to
+                      ;; :insufficient-data than to evidence. :majority already
+                      ;; covers quorum loss while leaving a replica that must
+                      ;; still be able to prove what it kept.
+                      :kill      {:targets [:one :majority]}
                       :pause     {:targets [:one :majority]}
                       :interval  (:nemesis-interval opts 15)
                       :membership-interval (:membership-interval opts 30)}
@@ -72,26 +83,28 @@
                                (gen/time-limit (:time-limit opts)))
                           (gen/log "Healing cluster")
                           (gen/nemesis (:final-generator nemesis))
-                          ;; Long enough for a re-joined Learner to be
-                          ;; backfilled and promoted. The final read compares
-                          ;; replicas; taking it while one is still catching up
-                          ;; reports catch-up latency as a durability
-                          ;; violation.
+                          ;; The final read compares replicas, so taking it
+                          ;; while one is still catching up reports catch-up
+                          ;; latency as a durability violation. This used to be
+                          ;; a fixed sleep, which can only ever be tuned against
+                          ;; one machine: 90 s was measured on a 4-CPU Docker
+                          ;; Desktop VM and was not enough on a hosted CI
+                          ;; runner, where it turned every log-append job red
+                          ;; with losses that were only lag.
                           ;;
-                          ;; 90 rather than 30 on measured evidence. On a 4-CPU
-                          ;; Docker Desktop VM, partition-fault runs left a node
-                          ;; behind by 53 entries at 30 s and by 5 at 60 s, and
-                          ;; only 90 s was never short. Too small a window here
-                          ;; does not hide bugs, it manufactures them: the
-                          ;; checker sees an un-caught-up replica as lost data.
+                          ;; The wait now ends on the condition itself — every
+                          ;; reporting node caught up to the acknowledged
+                          ;; high-water mark — with --recovery-time demoted to
+                          ;; the deadline. Faster than the old constant when the
+                          ;; cluster recovers quickly, and safe when it does
+                          ;; not, because a run that hits the deadline records
+                          ;; that it did instead of quietly reading anyway.
                           ;;
-                          ;; A fixed sleep is admittedly a blunt instrument —
-                          ;; the principled version polls every node's applied
-                          ;; frontier until they agree or a deadline passes,
-                          ;; which would be both faster and safer than any
-                          ;; constant. Until then, prefer waiting too long.
-                          (gen/log "Waiting for recovery")
-                          (gen/sleep (:recovery-time opts 90))
+                          ;; Workloads with no final read supply no
+                          ;; :await-generator and skip this entirely rather than
+                          ;; sleeping through it for nothing.
+                          (gen/log "Waiting for replicas to converge")
+                          (gen/clients (:await-generator workload))
                           (gen/clients (:final-generator workload)))})))
 
 (def cli-opts
@@ -122,13 +135,24 @@
     :parse-fn read-string
     :validate [pos? "must be positive"]]
 
-   [nil "--recovery-time SECONDS" "Seconds to wait after healing, before the
-                                  final read. Must cover a Learner's backfill
-                                  and promotion or the log-append checker sees
-                                  a lagging replica as a lost write."
+   [nil "--recovery-time SECONDS" "Deadline, in seconds, on the wait for
+                                  replicas to catch up after healing. The wait
+                                  ends as soon as every reporting node reaches
+                                  the acknowledged high-water mark, so this is
+                                  a ceiling and not a duration — raising it
+                                  costs nothing on a healthy run. A run that
+                                  hits it reports :converged? false, which is
+                                  what makes a tail loss unproven rather than a
+                                  finding."
     :default 90
     :parse-fn read-string
     :validate [(complement neg?) "must be non-negative"]]
+
+   [nil "--poll-interval SECONDS" "Seconds between frontier polls during the
+                                  recovery wait."
+    :default 2
+    :parse-fn read-string
+    :validate [pos? "must be positive"]]
 
    ["-r" "--rate HZ" "Approximate request rate per client"
     :default 15

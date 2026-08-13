@@ -23,6 +23,9 @@ on:
       rate:
         description: 'Requests/sec per client'
         default: '10'
+      recovery_time:
+        description: 'Deadline (seconds) on the wait for replicas to catch up'
+        default: '180'
 
 concurrency:
   group: jepsen-${{ github.ref }}
@@ -94,6 +97,19 @@ jobs:
       KOMMANDER_REF:  ${{ inputs.kommander_ref  || 'main' }}
       TIME_LIMIT:     ${{ inputs.time_limit     || '180' }}
       RATE:           ${{ inputs.rate           || '10' }}
+      # A deadline, not a duration: the run stops waiting the moment every node
+      # has caught up to the acknowledged high-water mark, so a healthy run does
+      # not pay this and there is nothing to tune. It is set well above the
+      # CLI's 90 s purely because a hosted runner is slower and more contended
+      # than the 4-CPU VM that number came from, and the window has to absorb
+      # whatever the nemesis did last — the wait begins in the same millisecond
+      # the final fault is undone, so a cold restart of five nodes or a
+      # Learner's backfill has to finish inside it. Run 31671031704 is what too
+      # short looks like: all four log-append jobs red, `:holes 0`, every loss a
+      # tail loss on a node that had just been restarted or rejoined. A run that
+      # exhausts this reports `:converged? false`, so a red result here can be
+      # told apart from a red result that means something.
+      RECOVERY_TIME:  ${{ inputs.recovery_time  || '180' }}
 
     steps:
       - name: Check out test suite
@@ -193,6 +209,7 @@ jobs:
             --concurrency-per-key ${{ matrix.concurrency_per_key || 3 }} \
             --ops-per-key ${{ matrix.ops_per_key }} \
             --nemesis-interval ${{ matrix.nemesis_interval || 15 }} \
+            --recovery-time "$RECOVERY_TIME" \
             --tarball target/kommander-harness.tar.gz
 
       - name: Collect node logs

@@ -143,17 +143,33 @@ every node that answers, no value applied twice, and monotonic application.
 
 **A node that did not answer the final read cannot lose anything.** It is
 excluded rather than treated as empty — otherwise a slow restart becomes a
-fabricated durability violation. This is also why `--recovery-time` defaults to
-90 s: a re-joined Learner needs to be backfilled and promoted before the
-comparison is meaningful. The number is measured, not guessed — on a 4-CPU
-Docker Desktop VM, partition-fault runs left a node behind by 53 entries at 30 s
-and by 5 at 60 s, while 90 s was never short.
+fabricated durability violation.
 
-A fixed sleep is a blunt instrument. The principled version polls every node's
-applied frontier until they agree or a deadline passes, which would be faster
-*and* safer than any constant; until that exists, prefer waiting too long. A
-tail loss that survives a generous window is worth investigating — but raise the
-window first, because that is the cheaper experiment.
+**The final read waits for a condition, not a duration.** A re-joined Learner
+must be backfilled and promoted before the comparison means anything, and this
+used to be bought with a fixed sleep. A constant can only ever be tuned against
+one machine, and this one was: 90 s came from a 4-CPU Docker Desktop VM, where
+partition-fault runs left a node behind by 53 entries at 30 s and by 5 at 60 s.
+On a hosted CI runner it was not enough, and the first nightly turned every
+`log-append` job red with losses that were only lag.
+
+The wait now polls every node's applied frontier and ends when each of them has
+reached the highest index the cluster *acknowledged* for that partition — the
+exact point past which a tail loss is impossible, because an acknowledged entry
+missing from a position the node has already applied past is a hole by
+definition. Note this is strictly stronger than waiting for the frontiers to
+*agree*: five replicas can agree perfectly and still sit below the high-water
+mark together, which is precisely the run where every node reports the same
+missing tail.
+
+`--recovery-time` is now the deadline on that wait rather than its length, so
+raising it costs nothing on a healthy run and the value no longer needs to be
+tuned. A run that hits the deadline records `:converged? false` in
+`:convergence`, which is what makes the `:tail-losses` count below it readable:
+converged, a tail loss is a real missing entry; not converged, the run ran out
+of patience and proved nothing. Nodes that are silent or still catching up both
+hold the wait open — a silent node cannot produce a false violation, but it is
+one more replica to compare against, and four is a weaker check than five.
 
 **A hole is not a truncated tail, and the verdict says which it found.** An
 acknowledged entry missing at an index *below* what the node has already applied
@@ -161,10 +177,11 @@ is a hole: the node moved past that position without ever applying it, and no
 amount of further waiting fills it in. An entry missing *beyond* the node's
 frontier is a tail loss, which is exactly what a replica that had not finished
 catching up looks like. Both fail the run, but `:holes` is evidence on its own
-while `:tail-losses` is first a prompt to raise `--recovery-time` and rerun —
-30 s has been observed to be too short for a node to close a 50-entry gap on a
-laptop-sized VM. Reporting them as one number invites both mistakes: filing a
-tuning artifact as a data-loss bug, and dismissing a real one as slowness.
+while a `:tail-losses` count must be read against `:convergence`: with
+`:converged? true` the replicas had caught up and the entries really are gone,
+and with `:converged? false` the run hit its deadline and the count proves
+nothing. Reporting them as one number invites both mistakes: filing a tuning
+artifact as a data-loss bug, and dismissing a real one as slowness.
 
 **The harness proves it did not eat the entry itself.** `StateMachine.Apply`
 declines payloads it cannot decode, and that path deliberately does *not* advance
