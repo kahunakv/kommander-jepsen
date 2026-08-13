@@ -53,8 +53,10 @@
     (let [lossy (node-state [[3 "v1"] [9 "v3"]])
           r     (la/check-logs acked {"n1" clean-node "n2" lossy} opts)]
       (is (false? (:valid? r)))
+      ;; :undelivered? is nil rather than false — this node reported no log index,
+      ;; so whether it holds the entry is unknown, not answered in the negative.
       (is (= [{:partition 1 :index 5 :value "v2" :node "n2" :found nil
-               :harness-dropped false :hole? true}]
+               :harness-dropped false :hole? true :undelivered? nil}]
              (:lost r))))))
 
 (deftest distinguishes-a-hole-from-a-truncated-tail
@@ -171,6 +173,49 @@
     (let [r (la/check-logs acked {"n1" clean-node "n2" clean-node} opts)]
       (is (true? (:valid? r)))
       (is (empty? (:undecodable r))))))
+
+;; ---------------------------------------------------------------------------
+;; Absent on the node vs held but never delivered
+;; ---------------------------------------------------------------------------
+
+(deftest an-entry-the-node-holds-but-never-delivered-is-marked-undelivered
+  (testing "the node's log reaches index 9, so v3 is *on* it and was simply never
+            handed to the state machine — replication worked and the apply path
+            did not. Reported distinctly because the two live in different
+            subsystems and look identical in the applied entries alone"
+    (let [held {1 {:entries (entries [[3 "v1"] [5 "v2"]]) :redeliveries 0 :log-index 9}}
+          r    (la/check-logs acked {"n1" clean-node "n2" held} opts)]
+      (is (false? (:valid? r)))
+      (is (= 1 (:undelivered r)))
+      (is (true? (:undelivered? (first (:lost r)))))
+      (is (= [{:node "n2" :partition 1 :applied 5 :log 9 :behind 4}] (:delivery r))))))
+
+(deftest an-entry-the-node-never-received-is-not-marked-undelivered
+  (testing "the log stops below the missing index, so the entry genuinely never
+            arrived — this one really is a replication question"
+    (let [absent {1 {:entries (entries [[3 "v1"] [5 "v2"]]) :redeliveries 0 :log-index 5}}
+          r      (la/check-logs acked {"n1" clean-node "n2" absent} opts)]
+      (is (false? (:valid? r)))
+      (is (= 0 (:undelivered r)))
+      (is (false? (:undelivered? (first (:lost r)))))
+      (is (empty? (:delivery r))))))
+
+(deftest a-hole-can-also-be-undelivered
+  (testing "the classification cuts across holes and tail losses rather than
+            replacing them: an index the node moved past can still be one it holds"
+    (let [hole {1 {:entries (entries [[3 "v1"] [9 "v3"]]) :redeliveries 0 :log-index 20}}
+          r    (la/check-logs acked {"n1" clean-node "n2" hole} opts)]
+      (is (= 1 (:holes r)))
+      (is (= 1 (:undelivered r))))))
+
+(deftest a-harness-without-the-log-index-reports-nil-not-false
+  (testing "older harness builds omit the field; guessing 'not undelivered' would
+            silently mis-file every loss in the run it matters for"
+    (let [old {1 {:entries (entries [[3 "v1"] [5 "v2"]]) :redeliveries 0}}
+          r   (la/check-logs acked {"n1" clean-node "n2" old} opts)]
+      (is (nil? (:undelivered? (first (:lost r)))))
+      (is (= 0 (:undelivered r)))
+      (is (empty? (:delivery r))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The recovery wait

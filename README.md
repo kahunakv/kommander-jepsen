@@ -114,6 +114,18 @@ mean different things:
 - `:undecodable` / `:harness-dropped` — the harness was handed the entry and
   refused it. That is a bug in **this repo**, not in Kommander.
 
+Read `:undelivered` **before** either of the above, because it changes which
+subsystem the run is about. It counts losses where Kommander physically holds the
+entry on that node — its log reaches the index — and never delivered it to the
+state machine. Replication succeeded; the apply path did not. `:delivery` lists
+the node/partitions whose log runs ahead of what they applied, with `:behind`.
+
+A run whose losses are mostly `:undelivered` is not a replication or backfill
+problem, and investigating it as one wastes the run: four consecutive
+investigations chased a replication fault that was not there, because applied
+entries alone cannot distinguish "never arrived" from "arrived and was never
+handed over".
+
 Everything from a run lands in `store/<test>/<timestamp>/` — history, verdict,
 timeline HTML, latency plots and per-node harness logs.
 

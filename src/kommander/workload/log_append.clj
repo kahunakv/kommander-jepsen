@@ -236,7 +236,20 @@
                              ;; replica that simply had not caught up when the
                              ;; final read ran. Both are reported; only the first
                              ;; is unambiguous evidence on its own.
-                             :hole? (< index (frontier node partition))}))
+                             :hole? (< index (frontier node partition))
+                             ;; True means Kommander *holds* this index on this
+                             ;; node and never delivered it to the state machine:
+                             ;; replication succeeded and the apply path did not.
+                             ;; That is a different defect from the entry never
+                             ;; arriving, in a different subsystem, and the two are
+                             ;; indistinguishable from the applied entries alone —
+                             ;; which is how four investigations in a row went
+                             ;; looking for a replication fault that was not there.
+                             ;; nil when the node did not report a log index (an
+                             ;; older harness build).
+                             :undelivered?
+                             (when-let [li (get-in nodes [node partition :log-index])]
+                               (<= index li))}))
 
         duplicated   (vec (for [[node ps] nodes
                                 [p state] ps
@@ -273,6 +286,22 @@
                       ;; raise --recovery-time and rerun.
                       :holes            (count (filter :hole? lost))
                       :tail-losses      (count (remove :hole? lost))
+                      ;; Cuts across holes and tail losses both: how many of the
+                      ;; losses are entries the node physically holds. A run whose
+                      ;; losses are mostly undelivered is not a replication
+                      ;; problem, and chasing one is how the previous four rounds
+                      ;; were spent.
+                      :undelivered      (count (filter :undelivered? lost))
+                      ;; Per node/partition, what Kommander holds versus what it
+                      ;; handed over. A large, *stable* gap here is the signature:
+                      ;; the entries arrived and the consumer never saw them.
+                      :delivery         (vec (for [[node ps] nodes
+                                                   [p state] ps
+                                                   :let  [li (:log-index state)
+                                                          ap (max-index (map :index (:entries state)))]
+                                                   :when (and li (< ap li))]
+                                               {:node node :partition p
+                                                :applied ap :log li :behind (- li ap)}))
                       :duplicated       duplicated
                       :unordered        unordered
                       :redelivered      redelivered
@@ -486,6 +515,12 @@
                               [p {:entries      (mapv #(select-keys % [:index :value])
                                                       (:entries r))
                                   :redeliveries (:redeliveries r)
+                                  ;; The highest log id Kommander holds for this
+                                  ;; partition, delivered or not. Lets the checker
+                                  ;; say whether a missing entry is absent from the
+                                  ;; node or merely undelivered on it — two findings
+                                  ;; with nothing in common but their symptom.
+                                  :log-index    (:logIndex r)
                                   ;; Indices the harness was handed but could
                                   ;; not decode. Without these, "missing on one
                                   ;; node" is ambiguous between a Kommander

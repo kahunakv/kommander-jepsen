@@ -70,6 +70,24 @@ public sealed class EntriesResponse
     public long AppliedIndex { get; set; }
 
     /// <summary>
+    /// The highest log id Kommander physically holds for this partition, whether or not it has
+    /// been delivered to this state machine.
+    /// </summary>
+    /// <remarks>
+    /// Reported so the checker can tell two very different things apart. An acknowledged entry
+    /// missing from <see cref="Entries"/> means "this node never got it" only if this index is
+    /// below it; if the index is at or above it, the entry is <em>on this node</em> and simply was
+    /// never delivered — replication succeeded and the apply path did not.
+    ///
+    /// Without this the two are indistinguishable in a verdict, and they lead investigations in
+    /// opposite directions: one is a replication or backfill question, the other is entirely
+    /// inside the consumer delivery path. Run 31747187466 spent its budget on the former while the
+    /// evidence, once found, pointed at the latter — a follower whose log reached ~203 had been
+    /// delivered 47.
+    /// </remarks>
+    public long LogIndex { get; set; }
+
+    /// <summary>
     /// Duplicate or below-frontier deliveries this node saw. Exposed rather
     /// than asserted internally: a non-zero count is a finding about
     /// Kommander's exactly-once apply contract, and the checker should be the
@@ -427,6 +445,9 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
             Status = "ok",
             Partition = partitionId,
             AppliedIndex = sm.AppliedIndex(partitionId),
+            // Read from Kommander, not from this state machine: the whole point is to compare what
+            // the node holds against what it delivered.
+            LogIndex = raft.WalAdapter.GetMaxLog(partitionId),
             Redeliveries = sm.Redeliveries(partitionId),
             Undecodable = [.. sm.Undecodable(partitionId)],
             Foreign = sm.Foreign
