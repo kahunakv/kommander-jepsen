@@ -1,0 +1,21 @@
+# Overlay that grants nodes CAP_SYS_TIME, enabling the :clock nemesis.
+#
+#   docker compose -f compose.yml -f compose.clock.yml up -d --build
+#
+# ONLY on a disposable Linux host. settimeofday inside a container moves the
+# shared kernel clock — on Docker Desktop that is the whole VM, and on a CI
+# runner it breaks TLS validation and the job agent along with everything else.
+#
+# It is worth doing somewhere, though: Kommander stamps proposal tickets with a
+# hybrid logical clock, so clock skew is the richest untested source of bugs in
+# this suite.
+
+services:
+  n1: &clock
+    cap_add:
+      - NET_ADMIN
+      - SYS_TIME
+  n2: *clock
+  n3: *clock
+  n4: *clock
+  n5: *clock

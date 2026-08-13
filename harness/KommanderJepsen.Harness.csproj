@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <RootNamespace>KommanderJepsen.Harness</RootNamespace>
+        <AssemblyName>KommanderJepsen.Harness</AssemblyName>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <!-- Reflection-based JSON is used for the client API DTOs; trimming
+             would strip the metadata and every request would deserialize to
+             nulls at runtime rather than fail at build time. -->
+        <PublishTrimmed>false</PublishTrimmed>
+    </PropertyGroup>
+
+    <!-- Path to a checkout of the Kommander repository. The harness references
+         Kommander by *project*, not by NuGet package, on purpose: these tests
+         exist to check the code in your working tree, and a package reference
+         would silently test the last published release instead.
+
+         Override from the command line:
+             dotnet publish harness -p:KommanderPath=/path/to/kommander -->
+    <PropertyGroup>
+        <KommanderPath Condition="'$(KommanderPath)' == ''">$(MSBuildThisFileDirectory)../../kommander</KommanderPath>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="CommandLineParser" Version="2.9.1" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="$(KommanderPath)/Kommander/Kommander.csproj" />
+    </ItemGroup>
+
+    <Target Name="CheckKommanderPath" BeforeTargets="PrepareForBuild">
+        <Error Condition="!Exists('$(KommanderPath)/Kommander/Kommander.csproj')"
+               Text="Kommander not found at '$(KommanderPath)'. Pass -p:KommanderPath=/path/to/kommander (see scripts/build-tarball.sh)." />
+    </Target>
+
+</Project>

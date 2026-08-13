@@ -1,0 +1,217 @@
+name: jepsen
+
+# Nightly + manual dispatch. This should NOT become a per-PR gate: Jepsen runs
+# are nondeterministic and a slow, contended runner manufactures indeterminate
+# operations that a fast machine would not — as a required check it would go
+# red for reasons unrelated to the change under review. A red run here means
+# "download the artifact and go look", not "the PR is broken".
+on:
+  schedule:
+    # 04:00 UTC nightly
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      kommander_repo:
+        description: 'Kommander repository'
+        default: 'kahunakv/kommander'
+      kommander_ref:
+        description: 'Kommander git ref to test'
+        default: 'main'
+      time_limit:
+        description: 'Seconds of load per test'
+        default: '180'
+      rate:
+        description: 'Requests/sec per client'
+        default: '10'
+
+concurrency:
+  group: jepsen-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workload: register
+            faults: partition
+            concurrency: 9
+            ops_per_key: 60
+          - workload: register
+            faults: kill
+            concurrency: 9
+            ops_per_key: 60
+          # Combined faults leave far more operations indeterminate, and
+          # indeterminate ops are what makes Knossos's search explode. This job
+          # therefore runs a deliberately cheaper-to-check history: fewer
+          # processes per key, fewer ops per key.
+          - workload: register
+            faults: partition,kill
+            concurrency: 8
+            concurrency_per_key: 2
+            ops_per_key: 40
+          # `pause` (SIGSTOP) is the fault the others cannot simulate: the
+          # process keeps its TCP connections but stops answering, so peers see
+          # a live-but-mute node rather than a refused connection or a severed
+          # link. That is the case partition quiescence and the SWIM-based
+          # failure detector are supposed to handle.
+          - workload: register
+            faults: pause
+            concurrency: 9
+            ops_per_key: 60
+          - workload: register
+            faults: membership
+            concurrency: 9
+            ops_per_key: 60
+          # The log-append checker is linear-time, so it needs none of the
+          # register workload's search-cost tuning and can run hotter.
+          - workload: log-append
+            faults: partition
+            concurrency: 10
+            ops_per_key: 60
+          - workload: log-append
+            faults: partition,kill
+            concurrency: 10
+            ops_per_key: 60
+          # Membership churn wipes the departing node and rejoins it as a
+          # Learner, so this job is the one that actually exercises backfill and
+          # the snapshot handoff — the paths the Log Matching check exists for.
+          - workload: log-append
+            faults: membership
+            concurrency: 10
+            ops_per_key: 60
+          - workload: log-append
+            faults: kill
+            concurrency: 10
+            ops_per_key: 60
+
+    env:
+      KOMMANDER_REPO: ${{ inputs.kommander_repo || 'kahunakv/kommander' }}
+      KOMMANDER_REF:  ${{ inputs.kommander_ref  || 'main' }}
+      TIME_LIMIT:     ${{ inputs.time_limit     || '180' }}
+      RATE:           ${{ inputs.rate           || '10' }}
+
+    steps:
+      - name: Check out test suite
+        uses: actions/checkout@v5
+
+      - name: Check out Kommander
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.KOMMANDER_REPO }}
+          ref: ${{ env.KOMMANDER_REF }}
+          path: kommander
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Maven deps
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2
+          key: m2-${{ hashFiles('project.clj') }}
+          restore-keys: m2-
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ hashFiles('kommander/**/*.csproj', 'harness/*.csproj') }}
+          restore-keys: nuget-
+
+      - name: Install plotting tools
+        # jepsen.checker/perf shells out to gnuplot; without it the perf checker
+        # returns :valid? :unknown and drags the whole run's verdict down with
+        # it. graphviz is used by the timeline/graph renderers.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gnuplot graphviz
+
+      - name: Install Leiningen
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/lein \
+            https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein
+          sudo chmod +x /usr/local/bin/lein
+          lein version
+
+      - name: Unit-test the checkers
+        # Negative controls. If these stop failing on injected violations, every
+        # green Jepsen run below is meaningless.
+        run: lein test
+
+      - name: Build harness tarball
+        # linux-x64: must match the runner/container architecture, NOT a dev
+        # laptop's arm64.
+        run: ./scripts/build-tarball.sh "$GITHUB_WORKSPACE/kommander" linux-x64
+
+      - name: Generate SSH key for the nodes
+        run: |
+          mkdir -p docker/secret
+          ssh-keygen -t ed25519 -N "" -C jepsen -f docker/secret/id_ed25519
+          mkdir -p ~/.ssh
+          cp docker/secret/id_ed25519 ~/.ssh/id_ed25519
+          chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+          printf 'Host *\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n' \
+            >> ~/.ssh/config
+
+      - name: Start Jepsen nodes
+        # Only n1..n5 — on a Linux runner the host reaches container IPs
+        # directly, so Jepsen runs on the runner itself and the control
+        # container is unnecessary.
+        run: docker compose -f docker/compose.yml up -d --build n1 n2 n3 n4 n5
+
+      - name: Map node names to container IPs
+        run: |
+          for n in n1 n2 n3 n4 n5; do
+            ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "jepsen-$n")"
+            echo "$ip $n" | sudo tee -a /etc/hosts
+          done
+          for n in n1 n2 n3 n4 n5; do
+            until ssh -o ConnectTimeout=2 root@"$n" true 2>/dev/null; do sleep 1; done
+            echo "$n reachable"
+          done
+
+      - name: Run ${{ matrix.workload }} / ${{ matrix.faults }}
+        # jepsen.cli exits non-zero when the checker returns :valid? false, so
+        # no result parsing is needed here.
+        run: |
+          lein with-profile +ci run test \
+            --workload ${{ matrix.workload }} \
+            --faults ${{ matrix.faults }} \
+            --nodes n1,n2,n3,n4,n5 \
+            --time-limit "$TIME_LIMIT" \
+            --rate "$RATE" \
+            --concurrency ${{ matrix.concurrency }} \
+            --concurrency-per-key ${{ matrix.concurrency_per_key || 3 }} \
+            --ops-per-key ${{ matrix.ops_per_key }} \
+            --nemesis-interval ${{ matrix.nemesis_interval || 15 }} \
+            --tarball target/kommander-harness.tar.gz
+
+      - name: Collect node logs
+        if: always()
+        run: |
+          mkdir -p store/docker-logs
+          for n in n1 n2 n3 n4 n5; do
+            docker logs "jepsen-$n" > "store/docker-logs/$n.docker.log" 2>&1 || true
+          done
+
+      - name: Upload Jepsen store
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: jepsen-${{ matrix.workload }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: store/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker/compose.yml down -v || true
