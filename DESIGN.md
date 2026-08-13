@@ -144,10 +144,16 @@ every node that answers, no value applied twice, and monotonic application.
 **A node that did not answer the final read cannot lose anything.** It is
 excluded rather than treated as empty — otherwise a slow restart becomes a
 fabricated durability violation. This is also why `--recovery-time` defaults to
-60 s: a re-joined Learner needs to be backfilled and promoted before the
-comparison is meaningful. It was 30 s until a partition run on a 4-CPU VM left a
-node 53 entries behind and 30 s did not close the gap; the same run was clean at
-90 s.
+90 s: a re-joined Learner needs to be backfilled and promoted before the
+comparison is meaningful. The number is measured, not guessed — on a 4-CPU
+Docker Desktop VM, partition-fault runs left a node behind by 53 entries at 30 s
+and by 5 at 60 s, while 90 s was never short.
+
+A fixed sleep is a blunt instrument. The principled version polls every node's
+applied frontier until they agree or a deadline passes, which would be faster
+*and* safer than any constant; until that exists, prefer waiting too long. A
+tail loss that survives a generous window is worth investigating — but raise the
+window first, because that is the cheaper experiment.
 
 **A hole is not a truncated tail, and the verdict says which it found.** An
 acknowledged entry missing at an index *below* what the node has already applied

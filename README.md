@@ -22,6 +22,8 @@ pauses, and removes/rejoins nodes:
 - **[DESIGN.md](DESIGN.md)** — why the tests are shaped this way, what the
   harness decides on Kommander's behalf, and the limits you will hit. Read it
   before trusting or dismissing a red result.
+- **[FINDINGS.md](FINDINGS.md)** — confirmed anomalies, with reproducers and the
+  alternative explanations that were ruled out.
 
 ## Requirements
 

@@ -78,15 +78,20 @@
                           ;; reports catch-up latency as a durability
                           ;; violation.
                           ;;
-                          ;; 60 rather than 30 on measured evidence: a
-                          ;; partition-fault run on a 4-CPU Docker Desktop VM
-                          ;; left a node 53 entries behind on one partition, and
-                          ;; 30 s of healed network was not enough to close the
-                          ;; gap — the same run passed cleanly at 90 s. Too
-                          ;; short here does not hide bugs, it manufactures
-                          ;; them.
+                          ;; 90 rather than 30 on measured evidence. On a 4-CPU
+                          ;; Docker Desktop VM, partition-fault runs left a node
+                          ;; behind by 53 entries at 30 s and by 5 at 60 s, and
+                          ;; only 90 s was never short. Too small a window here
+                          ;; does not hide bugs, it manufactures them: the
+                          ;; checker sees an un-caught-up replica as lost data.
+                          ;;
+                          ;; A fixed sleep is admittedly a blunt instrument —
+                          ;; the principled version polls every node's applied
+                          ;; frontier until they agree or a deadline passes,
+                          ;; which would be both faster and safer than any
+                          ;; constant. Until then, prefer waiting too long.
                           (gen/log "Waiting for recovery")
-                          (gen/sleep (:recovery-time opts 60))
+                          (gen/sleep (:recovery-time opts 90))
                           (gen/clients (:final-generator workload)))})))
 
 (def cli-opts
@@ -121,7 +126,7 @@
                                   final read. Must cover a Learner's backfill
                                   and promotion or the log-append checker sees
                                   a lagging replica as a lost write."
-    :default 60
+    :default 90
     :parse-fn read-string
     :validate [(complement neg?) "must be non-negative"]]
 
