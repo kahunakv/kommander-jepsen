@@ -4,9 +4,43 @@ Confirmed anomalies found by this suite, with enough detail to reproduce.
 
 ## 1. A leader does not apply some of its own committed entries
 
-**Status:** reproduced, 2 of 2 independent occurrences show the same shape.
-**Kommander:** `d293da0` ("Fence old leaders on higher-term votes"), `origin/main`.
+**Status:** **fixed** in `RaftPartitionStateMachine.cs`; verified below.
+**Found on:** `d293da0` ("Fence old leaders on higher-term votes"), `origin/main`.
 **Workload:** `log-append`.
+
+### Resolution
+
+Pipelined proposals complete in *network* order, not log order: a later proposal
+can reach quorum while an earlier one is still in flight. Delivering the later
+batch immediately advanced the leader's applied frontier over the in-flight
+entry, and the exactly-once guard then suppressed that entry's own delivery
+forever — the permanent hole.
+
+The fix parks such a batch in a `deferredLeaderApplies` map keyed by its lowest
+log id and flushes in id order as the blocking proposals resolve, with the
+buffer invalidated on a term change (after a step-down the WAL-based drains own
+in-order delivery, and a rolled-back id from the stale tenure could be
+re-proposed with a different payload). `DrainInheritedAppliesAsync` gained a
+`BlockedByInFlight` status so it stops without advancing the cursor over a
+current-term unresolved entry — including under `skipGaps`, since a sole voter's
+proposals still resolve via self-quorum.
+
+### Verification
+
+~14 runs carrying real load at the reproducing settings, **all `:holes 0`**,
+with `:undecodable []` and no `:harness-dropped true` anywhere.
+
+This is strong evidence, not proof. The pre-fix rate was 1 hole-run in 8 loaded
+runs (~12.5%), so 14 clean runs leaves roughly `0.875^14 ≈ 0.15` — about a 1-in-7
+chance of having missed a still-live bug by luck. Re-run the loop below if you
+want to drive that lower; each additional clean loaded run multiplies it by
+0.875.
+
+Note the fix was verified against the **working tree**, which at the time had
+uncommitted changes to `Kommander/RaftPartitionStateMachine.cs`. The harness
+project-references Kommander, so that is what was under test.
+
+### The original report follows.
 
 ### What happens
 
