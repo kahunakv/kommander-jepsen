@@ -30,6 +30,42 @@
     all-faults
     (set (map keyword (str/split s #",")))))
 
+(defn stats-checker
+  "`jepsen.checker/stats`, with its one failure mode reported as :unknown.
+
+  `stats` fails a run when any `:f` has zero `:ok` operations — `:valid? (pos?
+  oks)` in its fold is the only thing it ever tests. That is a real signal, but
+  it is *absence of evidence*, not evidence of a violation, and the two deserve
+  different words. The register workload's CAS succeeds only when its expected
+  value happens to match the register, so a run whose cluster was unavailable
+  for most of its duration can legitimately land on zero: run 31709747704 failed
+  exactly this way, `:cas` at 0 of 432 with 77 of 1308 operations succeeding
+  overall. A run that tested nothing was reported as a run that found something.
+
+  :unknown is the honest verdict, and the one this suite already reaches for in
+  the same situation: `--min-appends` turns a log-append run with too few
+  acknowledged appends into :unknown rather than a pass, on identical reasoning
+  — a property no operation exercised is neither satisfied nor violated.
+
+  Note this does not make such a run *green*, and is not meant to. Jepsen exits
+  1 on false and 2 on :unknown, so CI stays red either way; what changes is that
+  the red now says which kind it is."
+  []
+  (let [inner (checker/stats)]
+    (reify checker/Checker
+      (check [_ test history checker-opts]
+        (let [result (checker/check inner test history checker-opts)]
+          (if (false? (:valid? result))
+            (assoc result
+                   :valid? :unknown
+                   :error  :no-successful-ops
+                   ;; Which :f never once succeeded — the actionable part, and
+                   ;; not otherwise obvious in a :by-f map of a dozen entries.
+                   :no-successful-ops
+                   (vec (sort (keep (fn [[f s]] (when (false? (:valid? s)) f))
+                                    (:by-f result)))))
+            result))))))
+
 (defn kommander-test
   "Builds a test map from CLI options."
   [opts]
@@ -73,7 +109,7 @@
             :nemesis    (:nemesis nemesis)
             :checker    (checker/compose
                           {:perf       (checker/perf {:nemeses (:perf nemesis)})
-                           :stats      (checker/stats)
+                           :stats      (stats-checker)
                            :exceptions (checker/unhandled-exceptions)
                            :workload   (:checker workload)})
             :generator  (gen/phases

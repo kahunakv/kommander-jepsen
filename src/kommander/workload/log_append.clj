@@ -328,6 +328,24 @@
 ;; Recovery wait — poll until the replicas have caught up, not for a fixed time
 ;; ---------------------------------------------------------------------------
 
+(defn with-progress
+  "Annotates each lagging record with how far that node/partition moved since
+  the first poll: `:first-frontier` and `:advanced` (the difference).
+
+  This is the difference between a diagnosis and a shrug. A node sitting at
+  frontier 52 when it needs 94 has two completely different stories — it is
+  crawling and merely ran out of time, or it is wedged and would never have
+  arrived — and the final frontier alone cannot tell them apart. `:advanced 0`
+  across a three-minute quiescent window is not slowness, and says so without
+  anyone having to open a 251 MB node log to find out."
+  [lag first-frontiers]
+  (mapv (fn [{:keys [node partition frontier] :as entry}]
+          (let [first-f (get-in first-frontiers [node partition])]
+            (assoc entry
+                   :first-frontier first-f
+                   :advanced (when (and first-f frontier) (- frontier first-f)))))
+        lag))
+
 (defn await-convergence!
   "Blocks until nothing is `lagging`, or the deadline passes.
 
@@ -338,7 +356,10 @@
   caught up. Returns {:converged? :waited-ms :polls :lagging :missing}, which
   goes into the history and from there into the verdict. `:converged? false` is
   not itself a failure — it is the statement that the run ran out of patience,
-  and therefore that any tail loss reported afterwards is unproven.
+  and therefore that any tail loss reported afterwards is unproven. On that
+  path `:lagging` carries per-entry progress (see `with-progress`), because
+  \"ran out of patience\" and \"would have waited forever\" warrant different
+  responses and the distinction is free to record here.
 
   Timing is `nanoTime`, not `currentTimeMillis`: :clock is an available fault,
   and a deadline that a settimeofday can jump past would abandon the wait at
@@ -348,8 +369,9 @@
   (let [started  (System/nanoTime)
         deadline (+ started (* recovery-time 1000000000))
         elapsed  #(quot (- (System/nanoTime) started) 1000000)]
-    (loop [polls 1]
+    (loop [polls 1, first-frontiers nil]
       (let [fr      (poll!)
+            first-f (or first-frontiers fr)
             lag     (lagging high-water fr)
             missing (missing-nodes nodes fr)]
         (cond
@@ -359,18 +381,19 @@
                :lagging [] :missing []})
 
           (<= deadline (System/nanoTime))
-          (do (info "recovery deadline reached;" (count lag)
-                    "node/partitions still behind:" lag
-                    "| nodes not answering:" missing)
-              {:converged? false :waited-ms (elapsed) :polls polls
-               :lagging lag :missing missing})
+          (let [lag (with-progress lag first-f)]
+            (info "recovery deadline reached;" (count lag)
+                  "node/partitions still behind:" lag
+                  "| nodes not answering:" missing)
+            {:converged? false :waited-ms (elapsed) :polls polls
+             :lagging lag :missing missing})
 
           :else
           ;; Coerced, not merely computed: --poll-interval parses with
           ;; read-string, so a fractional second arrives as a Double and
           ;; Thread/sleep has no double overload to receive it.
           (do (Thread/sleep (long (* poll-interval 1000)))
-              (recur (inc polls))))))))
+              (recur (inc polls) first-f)))))))
 
 (defn poll-frontiers
   "Reads every node's applied frontier for every partition.

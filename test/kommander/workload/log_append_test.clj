@@ -244,8 +244,29 @@
     (let [r (la/await-convergence! (constantly {"n1" {1 2}}) ["n1" "n2"] {1 9}
                                    {:recovery-time 0 :poll-interval 0})]
       (is (false? (:converged? r)))
-      (is (= [{:node "n1" :partition 1 :frontier 2 :needs 9}] (:lagging r)))
+      (is (= [{:node "n1" :partition 1 :frontier 2 :needs 9
+               :first-frontier 2 :advanced 0}]
+             (:lagging r)))
       (is (= ["n2"] (:missing r))))))
+
+(deftest a-timed-out-wait-reports-whether-the-replica-was-moving
+  (testing "'ran out of time' and 'was never going to arrive' need different
+            responses, and the final frontier alone cannot tell them apart"
+    (let [stuck   (la/with-progress [{:node "n1" :partition 1 :frontier 52 :needs 94}]
+                                    {"n1" {1 52}})
+          crawling (la/with-progress [{:node "n1" :partition 1 :frontier 90 :needs 94}]
+                                     {"n1" {1 52}})]
+      (is (= 0 (:advanced (first stuck))) "wedged: no progress at all")
+      (is (= 38 (:advanced (first crawling))) "slow, but converging")
+      (is (= 52 (:first-frontier (first crawling)))))))
+
+(deftest progress-is-nil-rather-than-wrong-when-there-is-no-baseline
+  (testing "a node that only appeared after the first poll has no starting
+            frontier; inventing one would report a wedged replica as moving"
+    (let [r (la/with-progress [{:node "n2" :partition 1 :frontier 7 :needs 9}]
+                              {"n1" {1 3}})]
+      (is (nil? (:first-frontier (first r))))
+      (is (nil? (:advanced (first r)))))))
 
 (deftest the-verdict-records-whether-the-wait-converged
   (testing "reported, but never decisive: :convergence must not turn a clean

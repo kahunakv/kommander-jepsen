@@ -212,14 +212,13 @@ jobs:
             --recovery-time "$RECOVERY_TIME" \
             --tarball target/kommander-harness.tar.gz
 
-      - name: Collect node logs
-        if: always()
-        run: |
-          mkdir -p store/docker-logs
-          for n in n1 n2 n3 n4 n5; do
-            docker logs "jepsen-$n" > "store/docker-logs/$n.docker.log" 2>&1 || true
-          done
-
+      # No "collect docker logs" step. `docker logs` on these containers returns
+      # the sshd banner and nothing else — Kommander writes to a file inside the
+      # container, and jepsen's db/LogFiles already pulls that into the store as
+      # store/latest/<node>/kommander.log. A step that reliably captures 26 lines
+      # of noise is worse than no step: it looks like diagnostics, so the real
+      # logs go unread. Everything diagnosed from run 31709747704 came from the
+      # store.
       - name: Upload Jepsen store
         if: always()
         uses: actions/upload-artifact@v6

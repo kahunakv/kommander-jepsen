@@ -92,6 +92,12 @@ A run ends with a verdict map and either `Everything looks good!` or
   acknowledged, so "no divergence" is vacuous. The checker returns
   `:valid? :unknown` rather than success; a run where every operation failed
   must not read as a clean run.
+- `:no-successful-ops` (stats) — some operation never once succeeded, so the run
+  did not exercise it. Usually availability: under a kill nemesis a register run
+  can land zero successful CAS because the cluster was down for most of it. Also
+  `:valid? :unknown`, for the same reason as above — and note this still fails
+  the run (jepsen exits 1 on `false` and 2 on `:unknown`). It says *which* kind
+  of red, not that the red is harmless.
 
 A red `log-append` run reports `:holes` and `:tail-losses` separately, and they
 mean different things:
