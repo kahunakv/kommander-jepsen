@@ -138,18 +138,26 @@ public sealed class EntriesResponse
     public int ProposedBelowApplied { get; set; }
 
     /// <summary>
-    /// Lifetime count of stale <c>Proposed</c> duplicates of already-resolved ids this node
-    /// refused to write on this partition, or -1 when the partition is not hosted here.
+    /// Count of stale <c>Proposed</c> duplicates of already-resolved ids this node refused to write
+    /// on this partition <b>since the node last started</b>, or -1 when the partition is not hosted
+    /// here.
     /// </summary>
     /// <remarks>
-    /// Not a fault count. Duplicates of resolved ids arrive legitimately under partitions — a
+    /// <para>Not a fault count. Duplicates of resolved ids arrive legitimately under partitions — a
     /// deposed leader keeps broadcasting in-flight proposals, and the proposal retry can race its
     /// own commit — so a steady trickle is normal. It is reported because the guard that drops them
     /// is silent per-occurrence and load-bearing for correctness: it is what stops a duplicate from
     /// regressing a resolved row to <c>Proposed</c>, after which the write pipeline's truncation
-    /// deletes it and leaves a permanent hole below the node's advertised frontier. When that
-    /// failure shape appears again, zero here and a storm here point at opposite causes, and
-    /// without the count both look the same from the verdict.
+    /// deletes it and leaves a permanent hole below the node's advertised frontier. A trickle and a
+    /// storm point at different causes, and without the count both look the same from the verdict.
+    /// </para>
+    /// <para><b>Zero does not exonerate the guard under a kill nemesis.</b> Kommander keeps this
+    /// count in memory, and <c>:kill</c> restarts the whole harness process, so the count restarts
+    /// with it. Measured on run 31811192785: the <c>partition</c> job (no restarts) reported 863
+    /// against 57 emitted log lines — the counter winning, as intended — while the kill-driven jobs
+    /// reported 7 and 5 against 19 and 16 lines, i.e. BELOW the log. Read it as a floor since the
+    /// last restart. Under crash faults the node logs' throttled
+    /// <c>"Skipped stale Proposed duplicate"</c> lines are the authoritative record.</para>
     /// </remarks>
     public long StaleProposedSkipped { get; set; }
 

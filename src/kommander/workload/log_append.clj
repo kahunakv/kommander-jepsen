@@ -403,15 +403,25 @@
                               :applied (or (:applied-index state)
                                            (max-index (map :index (:entries state))))}))
                       ;; Stale duplicates of resolved ids refused across the cluster.
-                      ;; Reported as a plain 0 when nothing fired anywhere, because
-                      ;; that is the informative case: it rules the guard out as an
-                      ;; explanation for any hole above. Otherwise a total plus the
-                      ;; per-node split, since one node counting orders of magnitude
-                      ;; more than its peers is a different finding than all five
-                      ;; counting a few. Non-zero is NOT a fault — duplicates arrive
-                      ;; legitimately whenever a deposed leader is still broadcasting.
-                      ;; -1 (partition not hosted) is filtered out, not summed.
-                      :stale-proposed-skipped
+                      ;; A total plus the per-node split, since one node counting
+                      ;; orders of magnitude more than its peers is a different
+                      ;; finding than all five counting a few. Non-zero is NOT a
+                      ;; fault — duplicates arrive legitimately whenever a deposed
+                      ;; leader is still broadcasting. -1 (partition not hosted) is
+                      ;; filtered out, not summed.
+                      ;;
+                      ;; A 0 here does NOT mean the guard never fired. Kommander keeps
+                      ;; the count in memory and `:kill` restarts the process, so it
+                      ;; restarts too. Run 31811192785 measured it: the `partition`
+                      ;; job (no restarts) reported 863 against 57 emitted log lines,
+                      ;; while the kill jobs reported 7 and 5 against 19 and 16 lines
+                      ;; — under the log, not over it. Under crash faults the node
+                      ;; logs' "Skipped stale Proposed duplicate" lines are the record
+                      ;; that survives; this field is a floor since the last restart.
+                      ;; Key names the caveat: whoever reads results.edn sees only the
+                      ;; number, and "since restart" is what stops a 0 being read as
+                      ;; exoneration.
+                      :stale-proposed-skipped-since-restart
                       (let [counts (for [[node ps] nodes
                                          [_p state] ps
                                          :let  [n (:stale-proposed-skipped state)]
