@@ -384,6 +384,24 @@
                                           (for [[_ ps] nodes
                                                 [_ state] ps]
                                             (classify-frontier state)))
+                      ;; Nodes whose log still says `Proposed` for entries they have
+                      ;; already applied and serve. Deliberately *not* folded into
+                      ;; :reason — a node here is usually `:caught-up` by its own
+                      ;; frontier, and the damage lands on everyone else: the WAL read
+                      ;; that feeds backfill filters uncommitted rows, so this node
+                      ;; ships non-contiguous batches and every peer missing that range
+                      ;; stays missing it. Read this list *first* when :gap is high and
+                      ;; nothing else explains it.
+                      :blocking-backfill
+                      (vec (for [[node ps] nodes
+                                 [p state] ps
+                                 :let  [first-proposed (:first-proposed-below-applied state)]
+                                 :when (and first-proposed (pos? first-proposed))]
+                             {:node node :partition p
+                              :first-proposed first-proposed
+                              :count (:proposed-below-applied state)
+                              :applied (or (:applied-index state)
+                                           (max-index (map :index (:entries state))))}))
                       :duplicated       duplicated
                       :unordered        unordered
                       :redelivered      redelivered
@@ -612,6 +630,13 @@
                                   :first-uncommitted-index (:firstUncommittedIndex r)
                                   :first-uncommitted-type  (:firstUncommittedType r)
                                   :checkpoint-floor        (:checkpointFloor r)
+                                  ;; Rows this node still has as Proposed *below* its
+                                  ;; own applied frontier — it serves them as committed
+                                  ;; and its log disagrees. Invisible to every other
+                                  ;; measure here, and the reason a whole partition can
+                                  ;; starve while the responsible node looks healthy.
+                                  :first-proposed-below-applied (:firstProposedBelowApplied r)
+                                  :proposed-below-applied       (:proposedBelowApplied r)
                                   ;; The node's *delivered* frontier, which is not the
                                   ;; same as the highest index this workload recorded:
                                   ;; the state machine also receives entries of other

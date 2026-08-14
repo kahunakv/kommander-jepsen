@@ -126,6 +126,17 @@ public sealed class EntriesResponse
     /// </summary>
     public long CheckpointFloor { get; set; }
 
+    /// <summary>
+    /// Lowest id at or below <see cref="AppliedIndex"/> whose row is still <c>Proposed</c>, or -1.
+    /// The node considers this entry committed and serves it; its log does not say so. A node in
+    /// this state reads as healthy on every other measure while starving backfill for the whole
+    /// partition — see <see cref="ProposedBelowApplied"/>.
+    /// </summary>
+    public long FirstProposedBelowApplied { get; set; }
+
+    /// <summary>How many such rows the scan found, bounded by the scan limit.</summary>
+    public int ProposedBelowApplied { get; set; }
+
     /// <summary>Set when the frontier scan itself failed; the rest of the response is unaffected.</summary>
     public string? FrontierError { get; set; }
 
@@ -560,6 +571,8 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
 
         response.CheckpointFloor = floor;
 
+        DescribeAppliedTail(partitionId, applied, floor, response);
+
         long expected = scanFrom;
 
         foreach (RaftLog entry in tail.OrderBy(e => e.Id))
@@ -597,6 +610,66 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
         }
 
         response.FrontierScanTruncated = tail.Count >= FrontierScanLimit;
+    }
+
+    /// <summary>
+    /// Looks *below* the applied frontier for rows still marked <c>Proposed</c>.
+    /// </summary>
+    /// <remarks>
+    /// A node can consider an entry committed — its in-memory frontier is past it, it has been
+    /// delivered to the consumer, and it is served in reads — while the row on disk is still
+    /// <c>Proposed</c>. That node looks perfectly healthy from every frontier above:
+    /// <see cref="DescribeFrontier"/> starts at <c>AppliedIndex + 1</c> and cannot see it, so it
+    /// reports <c>:caught-up</c>.
+    ///
+    /// It is nonetheless the state that starves an entire partition. <c>GetRangeAsync</c> filters
+    /// uncommitted rows, so a leader in this state serves backfill reads that skip the range, the
+    /// batch is non-contiguous, and no follower missing those entries can ever be repaired. Every
+    /// other replica shows a gap and the responsible node shows nothing.
+    ///
+    /// <c>RolledBack</c> rows below the frontier are deliberately not counted: the drain advances
+    /// over them without delivering, which is correct and ordinary. Only entries still in limbo —
+    /// <c>Proposed</c> / <c>ProposedCheckpoint</c> — indicate the disagreement.
+    /// </remarks>
+    private void DescribeAppliedTail(int partitionId, long applied, long floor, EntriesResponse response)
+    {
+        response.FirstProposedBelowApplied = -1;
+
+        if (applied <= 0)
+            return;
+
+        long from = floor > 0 ? floor + 1 : 1;
+        if (from > applied)
+            return;
+
+        List<RaftLog> below;
+        try
+        {
+            below = raft.WalAdapter.ReadLogsRange(partitionId, from, FrontierScanLimit);
+        }
+        catch (Exception ex)
+        {
+            response.FrontierError ??= ex.GetType().Name;
+            return;
+        }
+
+        int proposed = 0;
+
+        foreach (RaftLog entry in below.OrderBy(e => e.Id))
+        {
+            if (entry.Id > applied)
+                break;
+
+            if (entry.Type is RaftLogType.Proposed or RaftLogType.ProposedCheckpoint)
+            {
+                if (response.FirstProposedBelowApplied < 0)
+                    response.FirstProposedBelowApplied = entry.Id;
+
+                proposed++;
+            }
+        }
+
+        response.ProposedBelowApplied = proposed;
     }
 
     public MembershipResponse Membership()

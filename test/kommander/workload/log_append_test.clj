@@ -306,6 +306,29 @@
     (is (= :unknown
            (la/classify-frontier (state [[1 "a"]] :log-index 9))))))
 
+(deftest a-node-serving-entries-its-log-calls-proposed-is-named
+  (testing "this node looks caught-up by its own frontier and is the reason every
+            other replica shows a gap — the backfill read filters those rows, so it
+            ships non-contiguous batches forever. It has to be named, or the verdict
+            blames the victims"
+    (let [culprit {1 (state [[3 "v1"] [5 "v2"] [9 "v3"]]
+                            :applied-index 9
+                            :log-index 9 :committed-index 9
+                            :first-gap-index -1 :first-uncommitted-index -1
+                            :first-proposed-below-applied 4
+                            :proposed-below-applied 2)}
+          r       (la/check-logs acked {"n1" culprit "n2" clean-node} opts)]
+      ;; Its own frontier is fine — which is exactly why it needs a separate field.
+      (is (= :caught-up (la/classify-frontier (get culprit 1))))
+      (is (= [{:node "n1" :partition 1 :first-proposed 4 :count 2 :applied 9}]
+             (:blocking-backfill r))))))
+
+(deftest a-healthy-node-is-not-listed-as-blocking
+  (testing "no proposed rows below the frontier means nothing to report; a false
+            positive here would point the next investigation at an innocent node"
+    (let [r (la/check-logs acked {"n1" clean-node "n2" clean-node} opts)]
+      (is (empty? (:blocking-backfill r))))))
+
 (deftest the-verdict-counts-and-explains-each-frontier
   (testing "the summary must name the subsystem, not just the size of the gap"
     (let [held    {1 (state [[3 "v1"] [5 "v2"]]
