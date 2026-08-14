@@ -119,6 +119,13 @@ public sealed class EntriesResponse
     /// </summary>
     public bool FrontierScanTruncated { get; set; }
 
+    /// <summary>
+    /// This partition's compaction floor on this node. Ids at or below it may be absent
+    /// legitimately — compacted by a snapshot, or never present — so an absence is only a gap
+    /// above it. Reported so the checker can audit that judgement rather than take it on trust.
+    /// </summary>
+    public long CheckpointFloor { get; set; }
+
     /// <summary>Set when the frontier scan itself failed; the rest of the response is unaffected.</summary>
     public string? FrontierError { get; set; }
 
@@ -537,9 +544,11 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
         long scanFrom = applied + 1;
 
         List<RaftLog> tail;
+        long floor;
         try
         {
             tail = raft.WalAdapter.ReadLogsRange(partitionId, scanFrom, FrontierScanLimit);
+            floor = raft.WalAdapter.GetLastCheckpoint(partitionId);
         }
         catch (Exception ex)
         {
@@ -548,6 +557,8 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
             response.FrontierError = ex.GetType().Name;
             return;
         }
+
+        response.CheckpointFloor = floor;
 
         long expected = scanFrom;
 
@@ -558,8 +569,20 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
 
             if (entry.Id != expected)
             {
-                response.FirstGapIndex = expected;
-                return;
+                // An absent id is only a gap ABOVE the compaction floor. At or below it the entry
+                // was compacted away by a snapshot, or never existed, and the log legitimately
+                // starts higher — so the run of ids from `expected` to this entry is not missing
+                // data and must not be reported as such. This mirrors exactly how
+                // DrainCommittedAppliesAsync classifies the same situation; without it a node whose
+                // log begins above 1 reports a spurious gap at 1, which is what run 31761087203
+                // did on five node/partitions at once.
+                if (expected > floor)
+                {
+                    response.FirstGapIndex = expected;
+                    return;
+                }
+
+                expected = entry.Id;
             }
 
             if (entry.Type is not (RaftLogType.Committed or RaftLogType.CommittedCheckpoint))

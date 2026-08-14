@@ -125,9 +125,16 @@ applied frontier stopped where it did — and that names the subsystem:
 | `:gap` | next entry absent (`:first-gap`) | replication / backfill |
 | `:unknown` | the harness reported no frontier scan | — |
 
+More than one can be true of the same node; `:reason` reports the **lowest
+actionable** boundary. `:undelivered` outranks `:gap`, because entries committed
+below an absent id are deliverable right now with nothing needed from elsewhere,
+while the gap above them is the next problem rather than the current one.
+
 `:delivery` gives the per-node detail with the raw frontiers alongside
-(`:applied`, `:committed`, `:log`), because a derived label is only as good as the
-quantity underneath it.
+(`:applied`, `:committed`, `:log`, and `:floor` on a gap), because a derived label
+is only as good as the quantity underneath it. `:applied` is the node's *delivered*
+frontier, not this workload's highest recorded index — the state machine also
+receives other log types and advances over them.
 
 This exists because applied entries alone cannot distinguish "never arrived",
 "arrived uncommitted" and "committed but never handed over" — three different

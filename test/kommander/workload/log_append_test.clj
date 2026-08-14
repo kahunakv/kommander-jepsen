@@ -265,8 +265,33 @@
     (is (= :gap
            (la/classify-frontier
              (state [[1 "a"]]
+                    :applied-index 1
                     :log-index 9 :committed-index 1
                     :first-gap-index 2 :first-uncommitted-index 5))))))
+
+(deftest undelivered-outranks-a-gap-above-it
+  (testing "entries committed and contiguous below an absent id are deliverable
+            right now, with nothing needed from anywhere else; reporting the gap
+            instead hides them. This is the n3 p4 case from run 31761087203 —
+            applied 171, committed 183, gap at 184 — where 12 entries were sitting
+            deliverable and the verdict said :gap"
+    (is (= :undelivered
+           (la/classify-frontier
+             (state [[1 "a"]]
+                    :applied-index 171
+                    :log-index 199 :committed-index 183
+                    :first-gap-index 184 :first-uncommitted-index -1))))))
+
+(deftest the-delivered-frontier-is-used-not-the-workloads-own-maximum
+  (testing "the state machine also receives other log types and advances over
+            them, so a node can have applied far past this workload's highest
+            recorded index without anything being wrong"
+    (is (= :caught-up
+           (la/classify-frontier
+             (state [[3 "a"]]              ; workload's max index is 3 …
+                    :applied-index 100     ; … but the node has delivered to 100
+                    :log-index 100 :committed-index 100
+                    :first-gap-index -1 :first-uncommitted-index -1))))))
 
 (deftest a-node-that-applied-everything-committed-is-caught-up
   (is (= :caught-up

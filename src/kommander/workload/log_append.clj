@@ -100,18 +100,32 @@
 
   These are three different subsystems — the apply path, the commit path, and
   replication — and the applied count alone cannot tell them apart. Six consecutive
-  investigations picked the wrong one, so the verdict now says which."
+  investigations picked the wrong one, so the verdict now says which.
+
+  Compared against the node's *delivered* frontier, not against the highest index
+  this workload recorded: the state machine also receives entries of other log
+  types and advances over them, so using the workload's own maximum would
+  manufacture undelivered entries out of ordinary foreign traffic."
   [state]
-  (let [applied     (max-index (map :index (:entries state)))
+  (let [applied     (or (:applied-index state)
+                        (max-index (map :index (:entries state))))
         committed   (:committed-index state)
         gap         (:first-gap-index state)
         uncommitted (:first-uncommitted-index state)]
     (cond
       (nil? committed)                :unknown
+
+      ;; Ordered before :gap deliberately. Both can hold at once — entries
+      ;; committed and undelivered *below* an absent id further up — and of the
+      ;; two only this one is actionable now: those entries are on the node,
+      ;; contiguous and committed, and could be delivered without anything
+      ;; arriving from anywhere. The gap above is the next boundary, not the
+      ;; current one, and reporting it instead hides the shortfall entirely.
+      (> committed applied)           :undelivered
+
       (and gap (pos? gap))            :gap
       (and uncommitted
            (pos? uncommitted))        :uncommitted
-      (> committed applied)           :undelivered
       :else                           :caught-up)))
 
 (defn lagging
@@ -334,7 +348,8 @@
                       :delivery         (vec (for [[node ps] nodes
                                                    [p state] ps
                                                    :let  [li (:log-index state)
-                                                          ap (max-index (map :index (:entries state)))
+                                                          ap (or (:applied-index state)
+                                                                 (max-index (map :index (:entries state))))
                                                           reason (classify-frontier state)]
                                                    ;; Listed when the node is visibly behind, or when
                                                    ;; the frontier scan found something actionable.
@@ -352,7 +367,12 @@
 
                                                  (and (:first-gap-index state)
                                                       (pos? (:first-gap-index state)))
-                                                 (assoc :first-gap (:first-gap-index state))
+                                                 (assoc :first-gap (:first-gap-index state)
+                                                        ;; Carried with the gap so the judgement
+                                                        ;; "absent above the floor, therefore
+                                                        ;; missing" can be checked rather than
+                                                        ;; trusted.
+                                                        :floor (:checkpoint-floor state))
 
                                                  (and (:first-uncommitted-index state)
                                                       (pos? (:first-uncommitted-index state)))
@@ -591,6 +611,15 @@
                                   :first-gap-index         (:firstGapIndex r)
                                   :first-uncommitted-index (:firstUncommittedIndex r)
                                   :first-uncommitted-type  (:firstUncommittedType r)
+                                  :checkpoint-floor        (:checkpointFloor r)
+                                  ;; The node's *delivered* frontier, which is not the
+                                  ;; same as the highest index this workload recorded:
+                                  ;; the state machine also receives entries of other
+                                  ;; log types, and its frontier advances over those
+                                  ;; too. Comparing a committed frontier against the
+                                  ;; workload's own max index would understate delivery
+                                  ;; and invent undelivered entries.
+                                  :applied-index           (:appliedIndex r)
                                   ;; Indices the harness was handed but could
                                   ;; not decode. Without these, "missing on one
                                   ;; node" is ambiguous between a Kommander
