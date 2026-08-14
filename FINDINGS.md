@@ -425,42 +425,90 @@ quietly wrong.
 
 ## 4. Two different entries committed at the same log index (Log Matching violation)
 
-**Status:** **open. Two occurrences, and the second is worse than the first.**
-**Found on:** Kommander `985f017` and `6eb2a09`; suite `7b4a8e4` and `39fe62a`.
+**Status:** **open, root-caused. Five occurrences.** Tracked in Vorpal as
+*"A leader reissues log indices it has already committed, so two different values
+commit at the same index"* (`6e659a78-6c0b-4de2-8c77-511d479becaa`), which holds
+the line-level diagnosis and the proposed fix. This section records what the
+suite observed.
+**Found on:** Kommander `985f017` through `fd684a3`.
 **Workload:** `log-append`, under `partition,kill` and `kill`.
-**Runs:** GitHub Actions [31731331616] (artifact `jepsen-log-append-6-1`) and
-[31750742525].
+**Runs:** GitHub Actions [31731331616] (artifact `jepsen-log-append-6-1`),
+[31750742525], [31766873204], [31805148040].
 
 ### What happens
 
-Two replicas hold different entries at the same index at the final read.
-
-**First occurrence** — [31731331616], partition 2, index 104:
-
-```clojure
-:values {"n1" "v5174", "n2" "v5174", "n5" "v5174", "n3" "v6067"}
-```
-
-Four replicas agree; n3 dissents.
-
-**Second occurrence** — [31750742525], partition 2, index 57:
-
-```clojure
-:values {"n1" "v2752", "n2" "v2752", "n3" "v1720", "n4" "v1720"}
-```
-
-**A two-two split with no majority.** The first occurrence had a clear majority
-view and one divergent replica, which at least leaves an obvious repair target.
-This one does not: two entries each sit on two replicas, and nothing in the
-applied state says which is the committed one.
+A leader stamps a new client write with a log index that is **already durably
+occupied on its own disk**. The write reaches quorum on the replicas that happen
+to have a hole at that index, the client is acked `:ok`, and the replicas holding
+the original value keep it forever. Two different values end up committed at the
+same index.
 
 This is the Log Matching Property stated directly — *if two logs contain an entry
 with the same index and term, the logs are identical in all entries up through
 that index* — and it is the property backfill and the snapshot handoff exist to
 preserve.
 
-Run verdict: `:diverged` as above, `:holes 6`, `:tail-losses 152`,
-`:acked-count 412`, `:duplicated []`, `:redelivered []`, `:undecodable []`.
+### Occurrences
+
+| run | job | index | values |
+|---|---|---|---|
+| [31731331616] | `partition,kill` p2 | 104 | `n1,n2,n5 = v5174` · **`n3 = v6067`** |
+| [31750742525] | `kill` p2 | 57 | `n1,n2 = v2752` · `n3,n4 = v1720` |
+| [31766873204] | `kill` | 167 | one entry, recorded in the run verdict |
+| [31805148040] | `partition,kill` p2 | 211–218 | `n1,n4,n5 = v51xx` · `n2,n3 = v42xx` |
+
+Two things only visible with all of them side by side:
+
+* **The value-reuse shape is consistent.** In every case one side holds a
+  lower-numbered value than the other at the same index — the signature of a slot
+  being issued twice.
+* **Either side can win.** In the first occurrence the lone dissenter n3 holds the
+  *newer* value while the majority kept the old; in the last it is the reverse.
+  That follows from the mechanism: which nodes have a hole at the reissued index
+  is an accident of the partition, not a property of the nodes.
+
+The [31750742525] occurrence is a **two-two split with no majority** — nothing in
+the applied state says which entry is the committed one, so any repair strategy
+based on following the majority is insufficient.
+
+### The occurrence that root-caused it
+
+[31805148040] is the first run in which the finding-5 wedge was fully fixed
+(`:frontiers {:caught-up 20}`, `:convergence {:converged? true, :waited-ms 4365}`),
+so this was the only remaining failure and the divergence could be read without
+the wedge on top of it.
+
+It diverges as a **band**, not a suffix — the logs agree above and below:
+
+```
+index 210      = v4080   on all five nodes
+index 211..218 = DIVERGENT
+index 219      = v4932   on all five nodes
+```
+
+Both sides are distinguishable by client outcome. At index 211 the majority holds
+`v5129`, acked `:ok :index 211` at 13:37:02.204; the minority holds `v4238`, whose
+append returned `:info :timeout` at 13:36:35.194. **The acked value is the one
+absent on two nodes**, which is why these are reported as `:lost` (16 = 8 indices
+× 2 nodes) and not merely `:diverged`.
+
+The allocation order proves the regression. Every acked p2 append, in sequence:
+
+```
+… 208, 209, 210            13:36:18–24    before the fault
+    219, 220               13:36:56–57    committed ABOVE the unresolved band
+    211, 212, … 218        13:37:02–04    band REFILLED with new values
+```
+
+The leader jumped the hole, committed above it, then went back and reissued
+211–218. The leader doing the reissue was n2 — promoted p2 leader in term 3 at
+13:37:01.246, one second after its own promotion barrier committed `v4238..v4769`
+into exactly those indices. n2 acked `v5129@211` to a client while its own log
+kept `v4238@211`.
+
+Run verdict: `:lost` 16, `:holes 16`, `:diverged` 8 entries, `:tail-losses 0`,
+`:frontiers {:caught-up 20}`. Note the cluster reports itself fully converged
+while holding contradictory histories.
 
 ### Why this is the most serious entry in this file
 
@@ -472,43 +520,59 @@ anchored above it, so the divergence is self-sustaining. Any read served by n3
 for that partition returns a different history than a read served by anyone
 else, and both look healthy.
 
-### The same node is the wedged one
+### Superseded: the co-located wedge, and the demand for terms
 
-n3 is also the replica reporting `:advanced 0` in this job, and its log shows
-two other symptoms at scale:
+Two earlier claims in this section were wrong and are recorded so they are not
+re-walked.
 
-* **180,787** `Ignoring stale CompleteAppendLogs … responseTerm/currentTerm`
-  warnings — by a wide margin the dominant content of its 43 MB log.
-* **1,364** pre-vote rounds and 5,456 vote requests: a continuous election loop.
-* **10,069** `RpcException: Status(StatusCode="Unavailable")` from the transport
-  dispatcher.
+**"The same node is the wedged one."** In [31731331616] the dissenting replica n3
+was also the one reporting `:advanced 0`, alongside 180,787 stale
+`CompleteAppendLogs` warnings, 1,364 pre-vote rounds and 10,069 transport
+`Unavailable` exceptions. That invited the reading that the divergence and the
+wedge were one defect. They are not: the wedge is finding 5's class, fixed across
+Kommander `ce54c44`…`fd684a3`, and the divergence survived every one of those
+fixes unchanged. The co-location was a symptom of the same fault window, not a
+causal link.
 
-Whether the divergence causes the wedge, the wedge causes the divergence, or
-both follow from the election loop is **not established**. The divergence is in
-partition 2 while n3's lagging entries in this job are partitions 1 and 4, which
-argues against the simplest story (that the conflicting index blocks that
-partition's replication) and is the first thing to check.
+**"Adding the term to `/log/entries` is the prerequisite for any further work."**
+It was not. What adjudicated this was the **order in which indices were handed
+out**, which the suite already records — every `:ok` append carries its assigned
+`:index`, so reading them in time order shows the allocator going backwards. The
+term would confirm the mechanism but was never needed to establish it. Exposing
+it is still worth doing, and is now a nice-to-have rather than a blocker.
 
 ### What is not established
 
-**Which entry is the legitimate one.** In the first occurrence `v5174` at least
-had the majority; in the second there is no majority at all. This suite records
-what each replica *applied*, not which entry Raft would consider committed, and
-that is not enough to adjudicate a two-two split. Deciding it needs the term at
-each index per node, which the harness does not expose — `/log/entries` serves
-`{:index :value}`. Adding the term is a cheap change to this repo and is now the
-prerequisite for any further work on this entry.
-
-**Whether the two occurrences share a mechanism.** Both are partition 2, which is
-suggestive and nothing more.
+**Which entry is the legitimate one**, in the two-two split of [31750742525].
+This suite records what each replica *applied*, not which entry Raft would
+consider committed. Under the root cause both are "legitimate" in the sense that
+each was accepted by the nodes that had room for it — the defect is upstream, in
+issuing the index twice, so adjudicating the split matters less than it seemed
+when this was the only thing known about the finding.
 
 ---
 
 ## 5. Committed entries are never delivered to the state machine
 
-**Status:** **fix written and unit-reproduced; not yet verified under load.**
-Confirmed as the cause of the non-convergence that findings 3 and 4 were each
-wrongly blamed for in earlier drafts.
+**Status:** **fix shipped in Kommander `4123016`; retained as hardening. Its
+stated justification below was disproved.**
+
+The claim this section originally made — that this was "the cause of the
+non-convergence that findings 3 and 4 were each wrongly blamed for" — is wrong.
+Once the harness reported the applied *and* committed frontier per node
+(suite `f194b2f`), every wedged replica showed `committed == applied`: nothing
+committed was being withheld, so the drain was not what stalled. The drain-retry
+fix is correct and worth keeping, but it repaired a reachable stall that was not
+the one being chased.
+
+The non-convergence was a different chain entirely — a proposal that loses quorum
+is never resolved, so its row stays `Proposed` forever and blocks every replica
+behind it. Root-caused and fixed across Kommander `ce54c44`, `441d3c4`,
+`ab47c4b`, `fd684a3`; the full account is in Vorpal
+`25016232-917b-4b65-b450-b847fc537cd6`. Verified in [31805148040]:
+`:frontiers {:caught-up 20}`, `:convergence {:converged? true, :waited-ms 4365}`,
+against 180 s of `:advanced 0` in every prior run.
+
 **Found on:** Kommander `6eb2a09`, suite `39fe62a`.
 **Workload:** `log-append`; observed under every fault profile, including
 `membership`.
@@ -632,3 +696,5 @@ it is. Nothing in the cluster is in a position to notice.
 [31731331616]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31731331616
 [31747187466]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31747187466
 [31750742525]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31750742525
+[31766873204]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31766873204
+[31805148040]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31805148040

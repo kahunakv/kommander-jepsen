@@ -137,6 +137,22 @@ public sealed class EntriesResponse
     /// <summary>How many such rows the scan found, bounded by the scan limit.</summary>
     public int ProposedBelowApplied { get; set; }
 
+    /// <summary>
+    /// Lifetime count of stale <c>Proposed</c> duplicates of already-resolved ids this node
+    /// refused to write on this partition, or -1 when the partition is not hosted here.
+    /// </summary>
+    /// <remarks>
+    /// Not a fault count. Duplicates of resolved ids arrive legitimately under partitions — a
+    /// deposed leader keeps broadcasting in-flight proposals, and the proposal retry can race its
+    /// own commit — so a steady trickle is normal. It is reported because the guard that drops them
+    /// is silent per-occurrence and load-bearing for correctness: it is what stops a duplicate from
+    /// regressing a resolved row to <c>Proposed</c>, after which the write pipeline's truncation
+    /// deletes it and leaves a permanent hole below the node's advertised frontier. When that
+    /// failure shape appears again, zero here and a storm here point at opposite causes, and
+    /// without the count both look the same from the verdict.
+    /// </remarks>
+    public long StaleProposedSkipped { get; set; }
+
     /// <summary>Set when the frontier scan itself failed; the rest of the response is unaffected.</summary>
     public string? FrontierError { get; set; }
 
@@ -510,6 +526,7 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
             // Read from Kommander, not from this state machine: the whole point is to compare what
             // the node holds against what it delivered.
             LogIndex = raft.WalAdapter.GetMaxLog(partitionId),
+            StaleProposedSkipped = raft.GetStaleProposedSkippedCount(partitionId),
             Redeliveries = sm.Redeliveries(partitionId),
             Undecodable = [.. sm.Undecodable(partitionId)],
             Foreign = sm.Foreign

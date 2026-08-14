@@ -402,6 +402,27 @@
                               :count (:proposed-below-applied state)
                               :applied (or (:applied-index state)
                                            (max-index (map :index (:entries state))))}))
+                      ;; Stale duplicates of resolved ids refused across the cluster.
+                      ;; Reported as a plain 0 when nothing fired anywhere, because
+                      ;; that is the informative case: it rules the guard out as an
+                      ;; explanation for any hole above. Otherwise a total plus the
+                      ;; per-node split, since one node counting orders of magnitude
+                      ;; more than its peers is a different finding than all five
+                      ;; counting a few. Non-zero is NOT a fault — duplicates arrive
+                      ;; legitimately whenever a deposed leader is still broadcasting.
+                      ;; -1 (partition not hosted) is filtered out, not summed.
+                      :stale-proposed-skipped
+                      (let [counts (for [[node ps] nodes
+                                         [_p state] ps
+                                         :let  [n (:stale-proposed-skipped state)]
+                                         :when (and n (pos? n))]
+                                     [node n])]
+                        (if (seq counts)
+                          {:total   (reduce + (map second counts))
+                           :by-node (into (sorted-map)
+                                          (for [[node xs] (group-by first counts)]
+                                            [node (reduce + (map second xs))]))}
+                          0))
                       :duplicated       duplicated
                       :unordered        unordered
                       :redelivered      redelivered
@@ -637,6 +658,14 @@
                                   ;; starve while the responsible node looks healthy.
                                   :first-proposed-below-applied (:firstProposedBelowApplied r)
                                   :proposed-below-applied       (:proposedBelowApplied r)
+                                  ;; Stale duplicates of already-resolved ids this node
+                                  ;; refused to write. Expected to be non-zero under
+                                  ;; faults; recorded because the guard that drops them
+                                  ;; is silent per-occurrence and is what prevents a
+                                  ;; resolved row regressing to Proposed and then being
+                                  ;; truncated away. Against the two rows above, zero
+                                  ;; here and a storm here point at opposite causes.
+                                  :stale-proposed-skipped       (:staleProposedSkipped r)
                                   ;; The node's *delivered* frontier, which is not the
                                   ;; same as the highest index this workload recorded:
                                   ;; the state machine also receives entries of other

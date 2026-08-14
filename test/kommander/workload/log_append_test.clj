@@ -323,6 +323,32 @@
       (is (= [{:node "n1" :partition 1 :first-proposed 4 :count 2 :applied 9}]
              (:blocking-backfill r))))))
 
+(deftest the-stale-duplicate-guard-reports-zero-when-it-never-fired
+  (testing "zero is the informative case: it rules the guard out as an explanation
+            for any hole, so it must be a plain 0 and not an absent key"
+    (let [r (la/check-logs acked {"n1" clean-node "n2" clean-node} opts)]
+      (is (= 0 (:stale-proposed-skipped r))))))
+
+(deftest the-stale-duplicate-guard-totals-and-splits-by-node
+  (testing "one node counting far more than its peers is a different finding than
+            all of them counting a few, so the split has to survive into the verdict"
+    (let [noisy {1 (assoc (state [[3 "v1"] [5 "v2"] [9 "v3"]])
+                          :stale-proposed-skipped 900)
+                 2 (assoc (state []) :stale-proposed-skipped 100)}
+          quiet {1 (assoc (state [[3 "v1"] [5 "v2"] [9 "v3"]])
+                          :stale-proposed-skipped 4)}
+          r     (la/check-logs acked {"n1" noisy "n2" quiet} opts)]
+      (is (= {:total 1004 :by-node {"n1" 1000 "n2" 4}}
+             (:stale-proposed-skipped r))))))
+
+(deftest an-unhosted-partition-is-not-counted-as-zero-skips
+  (testing "-1 means the partition is not on this node; summing it would silently
+            understate the total and could even make a real count read as zero"
+    (let [absent {1 (assoc (state [[3 "v1"] [5 "v2"] [9 "v3"]])
+                           :stale-proposed-skipped -1)}
+          r      (la/check-logs acked {"n1" absent "n2" clean-node} opts)]
+      (is (= 0 (:stale-proposed-skipped r))))))
+
 (deftest a-healthy-node-is-not-listed-as-blocking
   (testing "no proposed rows below the frontier means nothing to report; a false
             positive here would point the next investigation at an innocent node"
