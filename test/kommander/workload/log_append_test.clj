@@ -188,7 +188,10 @@
       (is (false? (:valid? r)))
       (is (= 1 (:undelivered r)))
       (is (true? (:undelivered? (first (:lost r)))))
-      (is (= [{:node "n2" :partition 1 :applied 5 :log 9 :behind 4}] (:delivery r))))))
+      ;; :reason is :unknown because this fixture reports no frontier scan — the
+      ;; node is visibly behind, but which frontier broke is genuinely not known.
+      (is (= [{:node "n2" :partition 1 :applied 5 :log 9 :behind 4 :reason :unknown}]
+             (:delivery r))))))
 
 (deftest an-entry-the-node-never-received-is-not-marked-undelivered
   (testing "the log stops below the missing index, so the entry genuinely never
@@ -216,6 +219,84 @@
       (is (nil? (:undelivered? (first (:lost r)))))
       (is (= 0 (:undelivered r)))
       (is (empty? (:delivery r))))))
+
+;; ---------------------------------------------------------------------------
+;; Which frontier broke
+;; ---------------------------------------------------------------------------
+
+(defn- state
+  "One node's reported state for one partition, with the frontier fields the
+  harness now returns."
+  [applied-pairs & {:as frontier}]
+  (merge {:entries (entries applied-pairs) :redeliveries 0}
+         frontier))
+
+(deftest committed-above-applied-is-an-undelivered-frontier
+  (testing "the entries are present, committed and contiguous — they could have
+            been delivered and were not, which is the apply path's problem"
+    (is (= :undelivered
+           (la/classify-frontier
+             (state [[1 "a"] [2 "b"]]
+                    :log-index 9 :committed-index 9
+                    :first-gap-index -1 :first-uncommitted-index -1))))))
+
+(deftest a-present-but-uncommitted-next-entry-is-not-a-delivery-fault
+  (testing "withholding here is correct behaviour — the open question is why the
+            entry never commits, which is a different subsystem entirely"
+    (is (= :uncommitted
+           (la/classify-frontier
+             (state [[1 "a"] [2 "b"]]
+                    :log-index 9 :committed-index 2
+                    :first-gap-index -1
+                    :first-uncommitted-index 3 :first-uncommitted-type "Proposed"))))))
+
+(deftest a-missing-next-entry-is-a-replication-fault
+  (testing "nothing above a gap is deliverable however the apply path behaves;
+            only the leader re-shipping it helps"
+    (is (= :gap
+           (la/classify-frontier
+             (state [[1 "a"] [2 "b"]]
+                    :log-index 9 :committed-index 2
+                    :first-gap-index 3 :first-uncommitted-index -1))))))
+
+(deftest a-gap-outranks-an-uncommitted-entry
+  (testing "both can be set; the gap is the lower boundary and the one that has to
+            be repaired first"
+    (is (= :gap
+           (la/classify-frontier
+             (state [[1 "a"]]
+                    :log-index 9 :committed-index 1
+                    :first-gap-index 2 :first-uncommitted-index 5))))))
+
+(deftest a-node-that-applied-everything-committed-is-caught-up
+  (is (= :caught-up
+         (la/classify-frontier
+           (state [[1 "a"] [2 "b"]]
+                  :log-index 2 :committed-index 2
+                  :first-gap-index -1 :first-uncommitted-index -1)))))
+
+(deftest a-harness-that-reports-no-frontier-is-unknown-not-guessed
+  (testing "an older harness build reports none of these; inventing a reason would
+            be exactly the mistake this field exists to prevent"
+    (is (= :unknown
+           (la/classify-frontier (state [[1 "a"]] :log-index 9))))))
+
+(deftest the-verdict-counts-and-explains-each-frontier
+  (testing "the summary must name the subsystem, not just the size of the gap"
+    (let [held    {1 (state [[3 "v1"] [5 "v2"]]
+                            :log-index 9 :committed-index 9
+                            :first-gap-index -1 :first-uncommitted-index -1)}
+          blocked {1 (state [[3 "v1"] [5 "v2"]]
+                            :log-index 9 :committed-index 5
+                            :first-gap-index -1
+                            :first-uncommitted-index 6 :first-uncommitted-type "Proposed")}
+          r       (la/check-logs acked {"n1" held "n2" blocked} opts)
+          by-node (into {} (map (juxt :node identity)) (:delivery r))]
+      (is (= :undelivered (get-in by-node ["n1" :reason])))
+      (is (= :uncommitted (get-in by-node ["n2" :reason])))
+      (is (= 6 (get-in by-node ["n2" :first-uncommitted])))
+      (is (= "Proposed" (get-in by-node ["n2" :uncommitted-type])))
+      (is (= {:undelivered 1 :uncommitted 1} (:frontiers r))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The recovery wait

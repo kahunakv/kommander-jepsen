@@ -114,17 +114,27 @@ mean different things:
 - `:undecodable` / `:harness-dropped` — the harness was handed the entry and
   refused it. That is a bug in **this repo**, not in Kommander.
 
-Read `:undelivered` **before** either of the above, because it changes which
-subsystem the run is about. It counts losses where Kommander physically holds the
-entry on that node — its log reaches the index — and never delivered it to the
-state machine. Replication succeeded; the apply path did not. `:delivery` lists
-the node/partitions whose log runs ahead of what they applied, with `:behind`.
+Read **`:frontiers`** first. It counts, across every node/partition, why the
+applied frontier stopped where it did — and that names the subsystem:
 
-A run whose losses are mostly `:undelivered` is not a replication or backfill
-problem, and investigating it as one wastes the run: four consecutive
-investigations chased a replication fault that was not there, because applied
-entries alone cannot distinguish "never arrived" from "arrived and was never
-handed over".
+| `:reason` | meaning | where to look |
+|---|---|---|
+| `:caught-up` | applied covers everything committed and contiguous | — |
+| `:undelivered` | entries present *and committed* above the applied frontier | the apply/delivery path |
+| `:uncommitted` | next entry present but not committed (`:uncommitted-type`) | the commit path — withholding is *correct* here |
+| `:gap` | next entry absent (`:first-gap`) | replication / backfill |
+| `:unknown` | the harness reported no frontier scan | — |
+
+`:delivery` gives the per-node detail with the raw frontiers alongside
+(`:applied`, `:committed`, `:log`), because a derived label is only as good as the
+quantity underneath it.
+
+This exists because applied entries alone cannot distinguish "never arrived",
+"arrived uncommitted" and "committed but never handed over" — three different
+subsystems that look identical from the outside. Six consecutive investigations
+picked the wrong one. `:undelivered` (the count) is retained but is the weaker
+signal: it is derived from the max log id, which includes uncommitted entries, so
+prefer `:frontiers`.
 
 Everything from a run lands in `store/<test>/<timestamp>/` — history, verdict,
 timeline HTML, latency plots and per-node harness logs.

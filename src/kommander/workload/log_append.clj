@@ -83,6 +83,37 @@
   [indices]
   (reduce max 0 indices))
 
+(defn classify-frontier
+  "Why a node/partition's applied frontier stopped where it did.
+
+  `state` is one node's reported state for one partition. Returns one of:
+
+    :caught-up      applied covers everything committed and contiguous here
+    :undelivered    entries are present and committed above the applied frontier —
+                    they could have been delivered and were not
+    :uncommitted    the next entry is present but not committed, so withholding is
+                    correct; the question is why it never commits
+    :gap            the next entry is absent, so nothing above it is deliverable
+                    until the leader re-ships it
+    :unknown        the harness did not report a frontier (older build, or the scan
+                    failed)
+
+  These are three different subsystems — the apply path, the commit path, and
+  replication — and the applied count alone cannot tell them apart. Six consecutive
+  investigations picked the wrong one, so the verdict now says which."
+  [state]
+  (let [applied     (max-index (map :index (:entries state)))
+        committed   (:committed-index state)
+        gap         (:first-gap-index state)
+        uncommitted (:first-uncommitted-index state)]
+    (cond
+      (nil? committed)                :unknown
+      (and gap (pos? gap))            :gap
+      (and uncommitted
+           (pos? uncommitted))        :uncommitted
+      (> committed applied)           :undelivered
+      :else                           :caught-up)))
+
 (defn lagging
   "Node/partitions that have not applied as far as the cluster acknowledged.
 
@@ -292,16 +323,47 @@
                       ;; problem, and chasing one is how the previous four rounds
                       ;; were spent.
                       :undelivered      (count (filter :undelivered? lost))
-                      ;; Per node/partition, what Kommander holds versus what it
-                      ;; handed over. A large, *stable* gap here is the signature:
-                      ;; the entries arrived and the consumer never saw them.
+                      ;; Per node/partition, every frontier that matters and — the
+                      ;; point of the exercise — *why* the applied one stopped. A
+                      ;; bare applied-vs-log gap says only that something is wrong;
+                      ;; :reason says which subsystem to look in. Raw numbers are
+                      ;; carried alongside deliberately: the previous version of
+                      ;; this field reported a derived boolean built on the max log
+                      ;; id, and reading that boolean as though it meant "committed"
+                      ;; produced a confident, wrong diagnosis.
                       :delivery         (vec (for [[node ps] nodes
                                                    [p state] ps
                                                    :let  [li (:log-index state)
-                                                          ap (max-index (map :index (:entries state)))]
-                                                   :when (and li (< ap li))]
-                                               {:node node :partition p
-                                                :applied ap :log li :behind (- li ap)}))
+                                                          ap (max-index (map :index (:entries state)))
+                                                          reason (classify-frontier state)]
+                                                   ;; Listed when the node is visibly behind, or when
+                                                   ;; the frontier scan found something actionable.
+                                                   ;; :unknown is deliberately not actionable — an
+                                                   ;; older harness reports it for every partition,
+                                                   ;; and listing them all would bury the real ones.
+                                                   :when (and li (or (< ap li)
+                                                                     (#{:undelivered :uncommitted :gap}
+                                                                      reason)))]
+                                               (cond-> {:node node :partition p
+                                                        :applied ap :log li :behind (- li ap)
+                                                        :reason reason}
+                                                 (:committed-index state)
+                                                 (assoc :committed (:committed-index state))
+
+                                                 (and (:first-gap-index state)
+                                                      (pos? (:first-gap-index state)))
+                                                 (assoc :first-gap (:first-gap-index state))
+
+                                                 (and (:first-uncommitted-index state)
+                                                      (pos? (:first-uncommitted-index state)))
+                                                 (assoc :first-uncommitted (:first-uncommitted-index state)
+                                                        :uncommitted-type (:first-uncommitted-type state)))))
+                      ;; How many node/partitions landed in each category. The line
+                      ;; to read first on a red run.
+                      :frontiers        (frequencies
+                                          (for [[_ ps] nodes
+                                                [_ state] ps]
+                                            (classify-frontier state)))
                       :duplicated       duplicated
                       :unordered        unordered
                       :redelivered      redelivered
@@ -521,6 +583,14 @@
                                   ;; node or merely undelivered on it — two findings
                                   ;; with nothing in common but their symptom.
                                   :log-index    (:logIndex r)
+                                  ;; Where the node's log stops being contiguously
+                                  ;; committed, and why. See `frontier` in the
+                                  ;; summary: these three turn "applied is behind"
+                                  ;; into a statement about which subsystem broke.
+                                  :committed-index         (:committedIndex r)
+                                  :first-gap-index         (:firstGapIndex r)
+                                  :first-uncommitted-index (:firstUncommittedIndex r)
+                                  :first-uncommitted-type  (:firstUncommittedType r)
                                   ;; Indices the harness was handed but could
                                   ;; not decode. Without these, "missing on one
                                   ;; node" is ambiguous between a Kommander

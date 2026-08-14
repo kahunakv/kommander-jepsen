@@ -88,6 +88,41 @@ public sealed class EntriesResponse
     public long LogIndex { get; set; }
 
     /// <summary>
+    /// Highest id at or above <see cref="AppliedIndex"/> that is contiguously present *and*
+    /// committed in this node's log. The frontier the apply path could legitimately reach right
+    /// now — so <c>CommittedIndex &gt; AppliedIndex</c> means entries were deliverable and were
+    /// not delivered.
+    /// </summary>
+    public long CommittedIndex { get; set; }
+
+    /// <summary>
+    /// First id above <see cref="AppliedIndex"/> that is absent from the log, or -1. A gap here
+    /// means nothing above it can be delivered no matter what the apply path does; the entry has
+    /// to be re-shipped.
+    /// </summary>
+    public long FirstGapIndex { get; set; }
+
+    /// <summary>
+    /// First id above <see cref="AppliedIndex"/> that is present but not committed, or -1, with
+    /// its <see cref="RaftLogType"/> in <see cref="FirstUncommittedType"/>. Withholding at this
+    /// point is correct behaviour, not a defect — the question it raises is why the entry never
+    /// commits.
+    /// </summary>
+    public long FirstUncommittedIndex { get; set; }
+
+    /// <summary>Log type of <see cref="FirstUncommittedIndex"/>, when there is one.</summary>
+    public string? FirstUncommittedType { get; set; }
+
+    /// <summary>
+    /// True when the scan hit its bound before finding a gap or an uncommitted entry, so
+    /// <see cref="CommittedIndex"/> is a floor rather than the true frontier.
+    /// </summary>
+    public bool FrontierScanTruncated { get; set; }
+
+    /// <summary>Set when the frontier scan itself failed; the rest of the response is unaffected.</summary>
+    public string? FrontierError { get; set; }
+
+    /// <summary>
     /// Duplicate or below-frontier deliveries this node saw. Exposed rather
     /// than asserted internally: a non-zero count is a finding about
     /// Kommander's exactly-once apply contract, and the checker should be the
@@ -438,13 +473,22 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
     // Introspection
     // ----------------------------------------------------------------------
 
+    /// <summary>
+    /// How far above the applied frontier the raw WAL is scanned to locate the first gap or
+    /// uncommitted entry. Bounded because this runs on a final read against a node that may hold a
+    /// very long tail, and the answer only needs the *first* discontinuity.
+    /// </summary>
+    private const int FrontierScanLimit = 8192;
+
     public EntriesResponse Entries(int partitionId)
     {
+        long applied = sm.AppliedIndex(partitionId);
+
         EntriesResponse response = new()
         {
             Status = "ok",
             Partition = partitionId,
-            AppliedIndex = sm.AppliedIndex(partitionId),
+            AppliedIndex = applied,
             // Read from Kommander, not from this state machine: the whole point is to compare what
             // the node holds against what it delivered.
             LogIndex = raft.WalAdapter.GetMaxLog(partitionId),
@@ -453,10 +497,83 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
             Foreign = sm.Foreign
         };
 
+        DescribeFrontier(partitionId, applied, response);
+
         foreach (StateMachine.AppliedEntry e in sm.Entries(partitionId))
             response.Entries.Add(new EntryDto { Index = e.Index, Value = e.Value });
 
         return response;
+    }
+
+    /// <summary>
+    /// Walks the raw WAL upward from the applied frontier and records where it stops being
+    /// contiguously committed, and why.
+    /// </summary>
+    /// <remarks>
+    /// A node that has applied fewer entries than it holds gives no clue, on its own, about which
+    /// of several unrelated defects is in play. This separates them by reading the log directly:
+    ///
+    /// <list type="bullet">
+    ///   <item>a missing id — the log is not contiguous, so nothing above it can be delivered and
+    ///     only the leader re-shipping it can help;</item>
+    ///   <item>a present but still <c>Proposed</c> id — replication succeeded and the entry was
+    ///     never committed, so the delivery path is correctly withholding;</item>
+    ///   <item>neither, with entries committed above the applied frontier — the entries are
+    ///     deliverable and were not delivered, which is a defect in the apply path.</item>
+    /// </list>
+    ///
+    /// Those three lead to three different subsystems, and six consecutive investigations picked
+    /// the wrong one because the applied count alone cannot tell them apart.
+    ///
+    /// Reported as facts rather than a verdict. Absences in an *uncommitted* tail can be legitimate
+    /// (a rolled-back proposal is deleted), so the checker decides what a given combination means.
+    /// </remarks>
+    private void DescribeFrontier(int partitionId, long applied, EntriesResponse response)
+    {
+        response.FirstGapIndex = -1;
+        response.FirstUncommittedIndex = -1;
+        response.CommittedIndex = applied;
+
+        long scanFrom = applied + 1;
+
+        List<RaftLog> tail;
+        try
+        {
+            tail = raft.WalAdapter.ReadLogsRange(partitionId, scanFrom, FrontierScanLimit);
+        }
+        catch (Exception ex)
+        {
+            // Introspection must never take down a final read: without it the checker loses the
+            // entries it came for, which matter more than this diagnostic.
+            response.FrontierError = ex.GetType().Name;
+            return;
+        }
+
+        long expected = scanFrom;
+
+        foreach (RaftLog entry in tail.OrderBy(e => e.Id))
+        {
+            if (entry.Id < scanFrom)
+                continue;
+
+            if (entry.Id != expected)
+            {
+                response.FirstGapIndex = expected;
+                return;
+            }
+
+            if (entry.Type is not (RaftLogType.Committed or RaftLogType.CommittedCheckpoint))
+            {
+                response.FirstUncommittedIndex = entry.Id;
+                response.FirstUncommittedType = entry.Type.ToString();
+                return;
+            }
+
+            response.CommittedIndex = entry.Id;
+            expected++;
+        }
+
+        response.FrontierScanTruncated = tail.Count >= FrontierScanLimit;
     }
 
     public MembershipResponse Membership()
