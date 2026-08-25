@@ -219,6 +219,55 @@ jobs:
       # of noise is worse than no step: it looks like diagnostics, so the real
       # logs go unread. Everything diagnosed from run 31709747704 came from the
       # store.
+      - name: Scan node logs for the promotion-drain wedge
+        # A wedged partition does not reliably turn a run red on its own. Run
+        # 32690955741 only went red because the stats checker found an :f with
+        # zero :ok ops; a wedge that clears after thirty seconds passes the
+        # checkers, and the signature then sits unread in the artifact. Both
+        # messages come from the promotion drain: the node hits a WAL hole, it
+        # refuses the promotion, and it reverts to Follower. While that repeats,
+        # the partition has no leader and every client operation gets no-leader.
+        # Baseline is 0 in every green job checked (both workloads, all fault
+        # modes) and 0 in the red membership job of run 32618187175, so the
+        # patterns do not fire on ordinary churn or on unrelated failures. Any
+        # hit is real. This runs on failure too: when the test step is already
+        # red, the counts say whether THIS is the reason.
+        if: always()
+        run: |
+          set -uo pipefail
+
+          if [ ! -d store ]; then
+            echo "No store/ directory - the run did not reach the test step."
+            exit 0
+          fi
+
+          # -r, not -R: store/latest and store/current are symlinks to the
+          # timestamped run directory, and -R would count every hit twice.
+          hits="$(grep -rIcE 'Inherited-entry drain found a WAL hole|Promotion refused' \
+                    --include=kommander.log store/ 2>/dev/null | grep -v ':0$' || true)"
+
+          if [ -z "$hits" ]; then
+            echo "No promotion-drain wedge signature in the node logs."
+            exit 0
+          fi
+
+          echo "::error::Promotion-drain wedge signature found in the node logs."
+          echo "$hits"
+          {
+            echo "### Promotion-drain wedge detected"
+            echo
+            echo "Matches per node log (\`WAL hole\` / \`Promotion refused\`):"
+            echo
+            echo '```'
+            echo "$hits"
+            echo '```'
+            echo
+            echo "A node won the election, hit a WAL hole in the promotion drain,"
+            echo "and reverted to Follower. Download the \`jepsen-*\` artifact and"
+            echo "read the node logs."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
       - name: Upload Jepsen store
         if: always()
         uses: actions/upload-artifact@v6
