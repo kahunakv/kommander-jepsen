@@ -495,3 +495,72 @@
                               {:min-appends 2})]
       (is (false? (:valid? r)))
       (is (= 2 (:partition (first (:diverged r))))))))
+
+;; ---------------------------------------------------------------------------
+;; HLC order
+;; ---------------------------------------------------------------------------
+
+(defn- stamped
+  "[[index value [l c n]] …] -> harness entries carrying an HLC timestamp."
+  [triples]
+  {1 {:entries      (mapv (fn [[i v [l c n]]]
+                            {:index i :value v :time {:n n :l l :c c}})
+                          triples)
+      :redeliveries 0}})
+
+(def ^:private stamped-clean
+  (stamped [[3 "v1" [1000 0 1]] [5 "v2" [1000 1 1]] [9 "v3" [1200 0 2]]]))
+
+(deftest accepts-stamps-that-increase-with-the-index
+  (let [r (la/check-logs acked {"n1" stamped-clean "n2" stamped-clean} opts)]
+    (is (true? (:valid? r)) (pr-str r))
+    (is (= 6 (:hlc-checked r)))))
+
+(deftest the-counter-and-then-the-node-id-break-ties
+  (testing "Kommander orders by physical time, then counter, then node id, so
+            equal physical times are legal as long as the rest increases"
+    (let [n (stamped [[3 "v1" [1000 0 1]] [5 "v2" [1000 0 2]] [9 "v3" [1000 1 1]]])
+          r (la/check-logs acked {"n1" n} opts)]
+      (is (true? (:valid? r)) (pr-str r)))))
+
+(deftest detects-a-stamp-that-went-backwards
+  (testing "a later index with an earlier stamp: a leader minting below entries
+            already in the log"
+    (let [n (stamped [[3 "v1" [1000 0 1]] [5 "v2" [2000 0 1]] [9 "v3" [1500 0 2]]])
+          r (la/check-logs acked {"n1" n} opts)]
+      (is (false? (:valid? r)))
+      (is (= [{:kind :backwards
+               :prev {:index 5 :time [2000 0 1]}
+               :next {:index 9 :time [1500 0 2]}
+               :node "n1" :partition 1}]
+             (:hlc-regressions r))))))
+
+(deftest detects-a-stamp-minted-twice
+  (let [n (stamped [[3 "v1" [1000 0 1]] [5 "v2" [1000 4 1]] [9 "v3" [1000 4 1]]])
+        r (la/check-logs acked {"n1" n} opts)]
+    (is (false? (:valid? r)))
+    (is (= :duplicate (:kind (first (:hlc-regressions r)))))))
+
+(deftest detects-one-entry-with-two-stamps
+  (testing "same value at the same index, different stamp on another node: the
+            stamp was rewritten somewhere between the leader and this replica"
+    (let [other (stamped [[3 "v1" [1000 0 1]] [5 "v2" [1000 1 1]] [9 "v3" [1300 0 2]]])
+          r     (la/check-logs acked {"n1" stamped-clean "n2" other} opts)]
+      (is (false? (:valid? r)))
+      (is (empty? (:diverged r)))
+      (is (= [{:index 9 :partition 1 :values {"n1" [1200 0 2] "n2" [1300 0 2]}}]
+             (:hlc-diverged r))))))
+
+(deftest a-value-divergence-is-not-reported-again-as-a-stamp-divergence
+  (let [other (stamped [[3 "v1" [1000 0 1]] [5 "OTHER" [1100 0 3]] [9 "v3" [1200 0 2]]])
+        r     (la/check-logs acked {"n1" stamped-clean "n2" other} opts)]
+    (is (false? (:valid? r)))
+    (is (= 1 (count (:diverged r))))
+    (is (empty? (:hlc-diverged r)))))
+
+(deftest entries-without-stamps-check-nothing-and-say-so
+  (testing "an older harness reports no :time; the HLC checks must neither fail
+            the run nor claim to have checked anything"
+    (let [r (la/check-logs acked {"n1" clean-node} opts)]
+      (is (true? (:valid? r)))
+      (is (zero? (:hlc-checked r))))))

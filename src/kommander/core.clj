@@ -10,6 +10,7 @@
             [jepsen.os.debian :as debian]
             [kommander.db :as kdb]
             [kommander.nemesis.membership :as membership]
+            [kommander.nemesis.skew :as skew]
             [kommander.workload.log-append :as log-append]
             [kommander.workload.register :as register]))
 
@@ -18,12 +19,18 @@
    :log-append log-append/workload})
 
 (def all-faults
-  "Clock faults are NOT in the default set on purpose: settimeofday inside a
-  container moves the shared kernel clock, which on Docker Desktop means the
-  whole VM. Enable :clock only on a disposable Linux host — but do enable it
-  there, because Kommander stamps proposal tickets with a hybrid logical clock
-  and that is where the interesting bugs live."
-  #{:partition :kill :pause :membership})
+  "Clock faults come in two kinds, and only one is in the default set.
+
+  :skew moves each node's hybrid-logical-clock time independently, through the
+  harness (see kommander.nemesis.skew). It needs no privileges, so it is safe
+  everywhere and is included here.
+
+  :clock is jepsen.nemesis.time, which calls settimeofday. It is NOT included:
+  every container on a host shares one kernel clock, so under Docker it moves
+  all nodes together — a cluster-wide jump, never skew between nodes — and it
+  moves the host's clock too, which on Docker Desktop means the whole VM. Use
+  it only on separate VMs, where each node really has its own clock."
+  #{:partition :kill :pause :membership :skew})
 
 (defn parse-faults [s]
   (if (= s "all")
@@ -92,13 +99,14 @@
                       :pause     {:targets [:one :majority]}
                       :interval  (:nemesis-interval opts 15)
                       :membership-interval (:membership-interval opts 30)}
-        ;; :membership is ours, not jepsen.nemesis.combined's — it would ignore
-        ;; the fault silently and the test would run with no membership churn
+        ;; :membership and :skew are ours, not jepsen.nemesis.combined's — it
+        ;; would ignore them silently and the test would run with no such fault
         ;; at all, which is exactly the kind of quiet no-op that reads as a
         ;; clean pass. Composed in explicitly instead.
         nemesis     (nc/compose-packages
                       (conj (nc/nemesis-packages nemesis-opts)
-                            (membership/package nemesis-opts)))]
+                            (membership/package nemesis-opts)
+                            (skew/package nemesis-opts)))]
     (merge tests/noop-test
            opts
            {:name       (str "kommander-" (name (:workload opts))

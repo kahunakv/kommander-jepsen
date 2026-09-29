@@ -60,6 +60,15 @@ public sealed class HarnessOptions
     public bool JoinExisting { get; set; }
 
     /// <summary>
+    /// Feed the node's hybrid logical clock from a <see cref="SkewedClock"/> and expose
+    /// <c>/debug/clock</c> so the <c>:skew</c> nemesis can move it. Off by default: without it the
+    /// HLC reads the wall clock exactly as in production, and a client port that can rewrite a
+    /// node's notion of time has no business being open when no test asked for it.
+    /// </summary>
+    [Option("enable-clock-skew", Required = false, HelpText = "Allow the HLC's physical time to be skewed via /debug/clock", Default = false)]
+    public bool EnableClockSkew { get; set; }
+
+    /// <summary>
     /// Commit RemoveMember(self) from the shutdown hook. This is a *start* flag:
     /// a node booted without it will never shrink the roster no matter how
     /// politely it is later asked to stop. Only reachable via SIGTERM, so the

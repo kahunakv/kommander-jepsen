@@ -6,9 +6,11 @@
 # shared kernel clock — on Docker Desktop that is the whole VM, and on a CI
 # runner it breaks TLS validation and the job agent along with everything else.
 #
-# It is worth doing somewhere, though: Kommander stamps proposal tickets with a
-# hybrid logical clock, so clock skew is the richest untested source of bugs in
-# this suite.
+# Note that on one host this does NOT produce skew between nodes: all
+# containers share the kernel clock, so bumping one node bumps all five. For
+# per-node skew of the hybrid logical clock, use `--faults skew`, which needs
+# neither this overlay nor CAP_SYS_TIME (see src/kommander/nemesis/skew.clj).
+# This overlay is only useful for whole-cluster clock jumps.
 
 services:
   n1: &clock

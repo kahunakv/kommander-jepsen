@@ -49,6 +49,13 @@
   [test]
   (boolean (some #{:membership} (:faults test))))
 
+(defn skew-faults?
+  "Is the :skew nemesis enabled? Governs --enable-clock-skew, which both feeds
+  the node's HLC from a movable clock and opens /debug/clock. A node started
+  without it answers the nemesis with a 404, and the fault becomes a no-op."
+  [test]
+  (boolean (some #{:skew} (:faults test))))
+
 (defn start-args
   "`join?` starts the node with --join-existing, which makes it ask the seeds in
   --initial-cluster for admission (as a Learner, promoted once caught up)
@@ -77,6 +84,8 @@
      ;; still models a crash, not a polite departure.
      (when (membership-faults? test)
        [:--graceful-leave-on-shutdown true])
+     (when (skew-faults? test)
+       [:--enable-clock-skew true])
      (when join?
        [:--join-existing true]))))
 

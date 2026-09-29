@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Kommander.Data;
+using Kommander.Time;
 
 namespace KommanderJepsen.Harness;
 
@@ -119,7 +120,12 @@ public sealed class StateMachine
     /// </summary>
     private long foreign;
 
-    public readonly record struct AppliedEntry(long Index, string? Value);
+    /// <param name="Time">
+    /// The HLC timestamp the leader stamped at propose time, as this node received it. Carried so
+    /// the checker can hold the log to the order its consumers assume: HLC order agrees with log
+    /// order, and no two entries share a stamp.
+    /// </param>
+    public readonly record struct AppliedEntry(long Index, string? Value, HLCTimestamp Time);
 
     private const int MaxRememberedOutcomes = 200_000;
 
@@ -214,7 +220,7 @@ public sealed class StateMachine
                     break;
             }
 
-            p.Applied.Add(new AppliedEntry(log.Id, entry.Value));
+            p.Applied.Add(new AppliedEntry(log.Id, entry.Value, log.Time));
             p.AppliedIndex = log.Id;
             Record(p, log.Id, outcome);
         }

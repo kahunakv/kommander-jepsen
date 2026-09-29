@@ -68,6 +68,10 @@ builder.Logging.AddSimpleConsole(o =>
 
 StateMachine stateMachine = new();
 
+// Null unless the :skew fault asked for it, so an ordinary run hands Kommander a clock on the
+// wall clock exactly as production does. See SkewedClock for why this replaces settimeofday.
+SkewedClock? skewedClock = opts.EnableClockSkew ? new SkewedClock() : null;
+
 builder.Services.AddSingleton(opts);
 builder.Services.AddSingleton(stateMachine);
 builder.Services.AddSingleton<Api>();
@@ -97,7 +101,7 @@ builder.Services.AddSingleton<IRaft>(services =>
             logger,
             syncWrites: !opts.DisableWalSyncWrites),
         communication,
-        new HybridLogicalClock(),
+        new HybridLogicalClock(skewedClock is null ? null : skewedClock.NowMs),
         logger
     );
 
@@ -173,8 +177,32 @@ app.MapPost("/log/append", async (AppendRequest request, Api api, HttpContext ct
 app.MapGet("/log/entries/{partition:int}", (int partition, Api api) =>
     Results.Ok(api.Entries(partition)));
 
-Console.WriteLine("Kommander Jepsen harness: raft={0}:{1} http={2} partitions={3} transport={4}",
-    configuration.Host, configuration.Port, opts.HttpPort, configuration.InitialPartitions, opts.Transport);
+if (skewedClock is not null)
+{
+    app.MapGet("/debug/clock", (IRaft raft) => Results.Ok(DescribeClock(skewedClock, raft)));
+
+    app.MapPost("/debug/clock", (ClockRequest request, IRaft raft) =>
+    {
+        string? error = skewedClock.Set(request.OffsetMs, request.StrobeDeltaMs, request.StrobePeriodMs, request.StrobeDurationMs);
+        return error is null
+            ? Results.Ok(DescribeClock(skewedClock, raft))
+            : Results.Ok(new ClockState { Status = error });
+    });
+}
+
+static ClockState DescribeClock(SkewedClock clock, IRaft raft)
+{
+    ClockState state = clock.Describe();
+    HLCTimestamp now = raft.HybridLogicalClock.SendOrLocalEvent(raft.GetLocalNodeId());
+    state.RealMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    state.HlcL = now.L;
+    state.HlcC = now.C;
+    state.HlcLeadMs = now.L - state.RealMs;
+    return state;
+}
+
+Console.WriteLine("Kommander Jepsen harness: raft={0}:{1} http={2} partitions={3} transport={4} clock-skew={5}",
+    configuration.Host, configuration.Port, opts.HttpPort, configuration.InitialPartitions, opts.Transport, opts.EnableClockSkew);
 
 await app.RunAsync();
 

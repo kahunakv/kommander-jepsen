@@ -91,6 +91,18 @@ jobs:
             faults: kill
             concurrency: 10
             ops_per_key: 60
+          # Per-node skew of the hybrid logical clock. Only log-append checks
+          # HLC order, so the fault runs there. With kill, a node skewed ahead
+          # restarts on true time — the wall-clock correction the persisted HLC
+          # floor exists for.
+          - workload: log-append
+            faults: skew
+            concurrency: 10
+            ops_per_key: 60
+          - workload: log-append
+            faults: skew,kill
+            concurrency: 10
+            ops_per_key: 60
 
     env:
       KOMMANDER_REPO: ${{ inputs.kommander_repo || 'kahunakv/kommander' }}

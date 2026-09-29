@@ -192,6 +192,16 @@ public sealed class EntryDto
 {
     public long Index { get; set; }
     public string? Value { get; set; }
+
+    /// <summary>The entry's HLC timestamp. See <see cref="StateMachine.AppliedEntry"/>.</summary>
+    public HlcDto? Time { get; set; }
+}
+
+public sealed class HlcDto
+{
+    public int N { get; set; }
+    public long L { get; set; }
+    public uint C { get; set; }
 }
 
 public sealed class MembershipResponse
@@ -543,7 +553,12 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
         DescribeFrontier(partitionId, applied, response);
 
         foreach (StateMachine.AppliedEntry e in sm.Entries(partitionId))
-            response.Entries.Add(new EntryDto { Index = e.Index, Value = e.Value });
+            response.Entries.Add(new EntryDto
+            {
+                Index = e.Index,
+                Value = e.Value,
+                Time = new HlcDto { N = e.Time.N, L = e.Time.L, C = e.Time.C }
+            });
 
         return response;
     }

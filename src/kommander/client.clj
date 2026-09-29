@@ -184,6 +184,22 @@
   (get! node (str "/log/entries/" partition) opts))
 
 ;; ---------------------------------------------------------------------------
+;; Clock skew — only served by a node started with --enable-clock-skew
+;; ---------------------------------------------------------------------------
+
+(defn set-clock!
+  "Sets the offset between `node`'s HLC physical time and its wall clock.
+  `skew` is {:offsetMs n} plus, for a strobe, :strobeDeltaMs, :strobePeriodMs
+  and :strobeDurationMs. Returns the node's clock state after the change,
+  including :hlcLeadMs — how far its HLC now runs ahead of true time."
+  ([node skew] (set-clock! node skew {:timeout 2000}))
+  ([node skew opts] (post! node "/debug/clock" skew opts)))
+
+(defn clock-state
+  ([node] (clock-state node {:timeout 2000}))
+  ([node opts] (get! node "/debug/clock" opts)))
+
+;; ---------------------------------------------------------------------------
 ;; Cluster
 ;; ---------------------------------------------------------------------------
 

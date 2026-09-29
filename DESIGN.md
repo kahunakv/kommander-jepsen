@@ -229,13 +229,43 @@ The `:removed` field records whether the roster actually shrank, verified
 against a *surviving* node. An unverified leave is exactly how a no-op nemesis
 passes for a working one.
 
-## Clock faults are off by default
+## Clock skew goes through the harness, not the kernel
 
-`settimeofday` inside a container moves the shared kernel clock — on Docker
-Desktop that means the whole VM. Kommander stamps proposal tickets with a hybrid
-logical clock, so clock skew is likely the richest untested source of bugs here;
-run `--faults partition,clock` on a disposable Linux host using
-`docker/compose.clock.yml`, not on your laptop.
+Jepsen's `:clock` fault calls `settimeofday`. Every container on a host shares
+one kernel clock, so under Docker that fault moves all five nodes together: a
+cluster-wide jump, never skew *between* nodes. A run with it enabled can pass
+without testing skew at all. It also moves the host's clock, which on Docker
+Desktop means the whole VM. `:clock` is therefore not in `all`. Use it only on
+separate VMs, with `docker/compose.clock.yml` granting `CAP_SYS_TIME`.
+
+`:skew` is the fault to use. A node started with `--enable-clock-skew` feeds its
+hybrid logical clock (HLC) from `SkewedClock`, which adds an offset the nemesis
+sets over `/debug/clock`. The offset is per process, so the skew is real and per
+node, and it needs no privileges. The nemesis bumps a random subset of nodes by
+up to about 262 s either way, strobes some, and resets others, with the same
+spread as `jepsen.nemesis.time`.
+
+Only the HLC moves. That covers the same ground as the kernel fault: every
+elapsed-time gate in Kommander (election timeouts, heartbeat freshness, the
+leadership lease) runs on `Stopwatch` ticks, which `settimeofday` does not move
+either.
+
+What skew can break is HLC order, not Raft order, so the register and
+log-append verdicts alone would not see it. The log-append checker therefore
+also checks, per partition, that stamps strictly increase with the log index
+(`:hlc-regressions`) and that every node holds the same stamp for the same entry
+(`:hlc-diverged`). `:hlc-checked` counts the stamps it saw; 0 means the harness
+build reported none and both checks were vacuous.
+
+Every nemesis operation records each node's `:hlc-lead`: how far its HLC runs
+ahead of true time. A node with no offset of its own and a large lead was pulled
+forward by a peer. That is the evidence that the skew propagated rather than
+staying local to the node that was bumped.
+
+The offset lives in the harness process, so a node killed while skewed restarts
+on true time. That is a wall-clock correction across a restart, which is the
+case Kommander's persisted HLC floor exists for. `--faults skew,kill` is the
+combination that tests it.
 
 ## Why CI is not a per-PR gate
 

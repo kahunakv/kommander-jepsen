@@ -26,6 +26,19 @@
 
   * **Monotonicity.** A node applies indices in increasing order.
 
+  * **HLC order.** Each entry carries the hybrid-logical-clock timestamp its
+    leader stamped at propose time. Within a partition those stamps must
+    strictly increase with the log index, and every node must hold the same
+    stamp for the same entry. Consumers that order mutations by HLC (Kahuna's
+    lock cache is one) rely on both, and Raft's term/index order being right
+    does not imply either: a new leader whose clock never merged its
+    predecessor's stamps mints stamps below entries already in the log. A node
+    restarted onto a clock that moved back is one way in; any path that hands a
+    node entries without merging their stamps into its clock would be another.
+    Every harness proposal is its own ReplicateLogs call, so two entries
+    sharing a stamp is a duplicate mint, not a batch.
+    Clock skew (`--faults skew`) is what makes these reachable.
+
   ## What is deliberately NOT checked
 
   **Gaps are legal.** The index space is shared with entries this workload never
@@ -213,11 +226,39 @@
                     :values (into {} (map (fn [[_ n v]] [n v]) triples))}))))
        vec))
 
+(defn- hlc-key
+  "An entry's HLC timestamp in Kommander's total order — physical time, then
+  counter, then node id (HLCTimestamp.CompareTo) — or nil when the harness did
+  not report one, so an older harness build checks nothing rather than
+  everything."
+  [entry]
+  (let [{:keys [n l c]} (:time entry)]
+    (when (and l (pos? l))
+      [l c n])))
+
+(defn- hlc-regressions
+  "Adjacent stamped entries, in index order, whose HLC timestamp did not
+  strictly increase. :duplicate is the same stamp twice; :backwards is a later
+  index with an earlier stamp."
+  [entries]
+  (->> entries
+       (filter hlc-key)
+       (sort-by :index)
+       (partition 2 1)
+       (keep (fn [[a b]]
+               (let [order (compare (hlc-key a) (hlc-key b))]
+                 (when-not (neg? order)
+                   {:kind (if (zero? order) :duplicate :backwards)
+                    :prev {:index (:index a) :time (hlc-key a)}
+                    :next {:index (:index b) :time (hlc-key b)}}))))
+       vec))
+
 (defn check-logs
   "The whole verdict, as data.
 
   `acked`  — [{:partition p :index i :value v} …] appends the cluster confirmed
-  `nodes`  — {node {partition {:entries [{:index :value} …] :redeliveries n}}}
+  `nodes`  — {node {partition {:entries [{:index :value :time} …] :redeliveries n}}}
+             :time is {:n :l :c}, and optional
   `opts`   — {:min-appends n}
 
   Returns a checker-shaped map. Kept free of Jepsen types on purpose: the
@@ -240,6 +281,28 @@
         diverged     (vec (mapcat (fn [[p by-node]]
                                     (map #(assoc % :partition p) (divergences by-node)))
                                   by-partition))
+
+        ;; The same entry must carry the same stamp everywhere. Indices whose
+        ;; *values* diverge are left out: those are already in `diverged`, and
+        ;; two different entries differing in stamp too is no second finding.
+        hlc-diverged (let [value-split (set (map (juxt :partition :index) diverged))]
+                       (vec (for [p         partitions
+                                  :let      [by-node (into {}
+                                                           (for [[node ps] nodes
+                                                                 :when     (contains? ps p)]
+                                                             [node (into {}
+                                                                         (keep (fn [e]
+                                                                                 (when-let [k (hlc-key e)]
+                                                                                   [(:index e) k])))
+                                                                         (:entries (get ps p)))]))]
+                                  d         (divergences by-node)
+                                  :when     (not (value-split [p (:index d)]))]
+                              (assoc d :partition p))))
+
+        hlc-regressed (vec (for [[node ps] nodes
+                                 [p state] ps
+                                 bad       (hlc-regressions (:entries state))]
+                             (assoc bad :node node :partition p)))
 
         ;; An acknowledged append must be present, at its index, on every node
         ;; that answered. "Answered" matters: a node that is down at the final
@@ -435,6 +498,16 @@
                           0))
                       :duplicated       duplicated
                       :unordered        unordered
+                      ;; How many applied entries carried a stamp. 0 means the two
+                      ;; HLC checks below ran against nothing — an older harness —
+                      ;; and their emptiness proves nothing.
+                      :hlc-checked      (count (for [[_ ps] nodes
+                                                     [_ state] ps
+                                                     e (:entries state)
+                                                     :when (hlc-key e)]
+                                                 e))
+                      :hlc-regressions  hlc-regressed
+                      :hlc-diverged     hlc-diverged
                       :redelivered      redelivered
                       :undecodable      (vec (for [[[node p] idxs] undecodable
                                                    :when (seq idxs)]
@@ -452,6 +525,7 @@
       ;; Kommander — and a harness that silently drops entries would make every
       ;; other property on this list vacuous.
       (every? empty? [diverged lost duplicated unordered redelivered
+                      hlc-regressed hlc-diverged
                       (:undecodable summary)])
       (assoc summary :valid? true)
 
@@ -643,7 +717,7 @@
                             (for [p partitions
                                   :let [r (kc/log-entries node p {:timeout 30000})]
                                   :when (= "ok" (:status r))]
-                              [p {:entries      (mapv #(select-keys % [:index :value])
+                              [p {:entries      (mapv #(select-keys % [:index :value :time])
                                                       (:entries r))
                                   :redeliveries (:redeliveries r)
                                   ;; The highest log id Kommander holds for this

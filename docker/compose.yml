@@ -12,7 +12,8 @@ x-node: &node
   # SYS_TIME is deliberately absent: a container that can call settimeofday
   # moves the *host's* clock, which on a CI runner breaks TLS validation and
   # the job agent itself. Add it via docker/compose.clock.yml only on a
-  # disposable Linux box where you actually want clock faults.
+  # disposable Linux box where you actually want clock faults. For skew
+  # between nodes, use `--faults skew` instead: it needs no capability at all.
   cap_add:
     - NET_ADMIN
   networks:
