@@ -142,7 +142,47 @@ as a leader silently serving state that is missing a committed write.
 
 ## 2. An acknowledged append is absent from every replica, at an index another entry occupies
 
-**Status:** **open. Reproduced — three occurrences across two runs.**
+**Status (2026-10-07):** **no occurrence since Kommander `04429b3`; most
+probable root cause is the allocator reissue of finding 4.** Tracked in Vorpal as
+*"An acknowledged append is absent from every replica, and an earlier
+indeterminate value holds its index"* (`eca9d819-6187-44ed-94a4-347510b1a2b3`,
+IN_PROGRESS), which holds the source analysis. The sections after this status
+are the original report and are kept as history.
+
+- **Five job-runs, eight values, all before `04429b3`.** A re-scan of the console
+  logs of all 57 failed log-append jobs from 2026-08-13 to 2026-10-07 found the
+  three occurrences below plus two that were not recorded: [31761087203] `kill`
+  (p2/56–58 as a contiguous band, and p3/64) and [31762193870] `partition,kill`
+  (p4/4), both on Kommander `7d15105`.
+- **Rate before and after.** Fault job-runs (`partition`, `kill`,
+  `partition,kill`) that reached the test step: 5 of 45 with this shape before
+  `04429b3` (2026-08-13 to 08-14); 0 of 208 after it (2026-08-14 to 10-07). One-sided
+  Fisher exact test: p = 1.5e-4. The 95 % upper bound on the post-fix rate is
+  1.4 % per job-run.
+- **Mechanism (inferred, not observed).** The pre-fix allocator could stamp a new
+  proposal at an index that an earlier, indeterminate proposal already held. A
+  quorum of followers with a hole there accepted it, and the client got `ok`. If
+  those copies stayed, two values committed at one index (finding 4). If a later
+  backfill from a node with the old value overwrote them, the acknowledged value
+  was gone from every node (this finding). Run [31731331616] shows both shapes.
+  The node logs that would show the overwrite step are expired.
+- **Local loop on Kommander `v1.10.2`: 0 of 100.** `log-append --faults
+  partition,kill` at rate 25, concurrency 10, 30 s, on a local 5-node cluster
+  (2026-10-07). All 100 counted job-runs are `:valid? true`, converged, with no
+  holes and no tail losses: 29,916 acked appends in total. Another 16 job-runs
+  were `:unknown` with 0 to 12 acked appends and do not count. The 95 % upper
+  bound is 3.0 % per job-run for `v1.10.2` alone, and 1.0 % together with the
+  208 CI job-runs.
+- **One uncounted job-run did not converge, and it is not this finding.** Two
+  blank voters (log at 0) did not get 2 to 3 restored entries on an idle range
+  for 90 s. The entries were on a majority, and nothing acknowledged was lost.
+  Kommander keeps blank voters confined on purpose (Vorpal `32348e83`).
+- **Verdict:** bounded, not reproduced. The fix in `04429b3` is the most probable
+  cause of the stop, but that is a guess: the overwrite step was never observed,
+  and other commits landed in the same window. The later `83827fc8` is most
+  probably not the cause: 70 CI fault job-runs between `04429b3` and 2026-08-28 were clean before
+  it landed. No end-to-end regression test of this shape exists yet.
+
 **Found on:** Kommander `f1658ba` ("Fix leader apply ordering for pipelined
 commits") and `985f017`; suite `698c48b` and `7b4a8e4`.
 **Workload:** `log-append`, under `partition`, `partition,kill` and `kill`.
@@ -425,11 +465,14 @@ quietly wrong.
 
 ## 4. Two different entries committed at the same log index (Log Matching violation)
 
-**Status:** **open, root-caused. Five occurrences.** Tracked in Vorpal as
-*"A leader reissues log indices it has already committed, so two different values
-commit at the same index"* (`6e659a78-6c0b-4de2-8c77-511d479becaa`), which holds
-the line-level diagnosis and the proposed fix. This section records what the
-suite observed.
+**Status:** **fixed in Kommander `04429b3` (2026-08-14); Vorpal DONE.** Tracked
+as *"A leader reissues log indices it has already committed, so two different
+values commit at the same index"* (`6e659a78-6c0b-4de2-8c77-511d479becaa`), which
+holds the line-level diagnosis, the fix and the verification (runs
+[31809324887] and [31811192785], 9 of 9 jobs green each). As of 2026-10-07, no
+failed log-append job after the fix has a non-empty `:diverged`, across 276
+log-append job-runs. Finding 2 is most probably the other outcome of the same
+defect. This section records what the suite observed before the fix.
 **Found on:** Kommander `985f017` through `fd684a3`.
 **Workload:** `log-append`, under `partition,kill` and `kill`.
 **Runs:** GitHub Actions [31731331616] (artifact `jepsen-log-append-6-1`),
@@ -698,3 +741,7 @@ it is. Nothing in the cluster is in a position to notice.
 [31750742525]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31750742525
 [31766873204]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31766873204
 [31805148040]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31805148040
+[31761087203]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31761087203
+[31762193870]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31762193870
+[31809324887]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31809324887
+[31811192785]: https://github.com/kahunakv/kommander-jepsen/actions/runs/31811192785
