@@ -62,7 +62,7 @@ for:
 | Flag | Meaning |
 |---|---|
 | `--workload` | `register` or `log-append` |
-| `--faults` | comma-separated `partition,kill,pause,membership,skew,clock`, or `all` (`clock` excluded; see DESIGN.md) |
+| `--faults` | comma-separated `partition,kill,pause,membership,skew,clock`, or `all` (`clock` excluded; see DESIGN.md). `lost-tail` damages a disk and runs alone, on `log-append` only |
 | `--partitions` | Raft partitions (independent Raft groups) per cluster |
 | `--transport` | `grpc` (default, the production path) or `rest` |
 | `--concurrency` | total client threads; **must** be an exact multiple of `--concurrency-per-key` |

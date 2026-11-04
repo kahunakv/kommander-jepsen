@@ -9,8 +9,10 @@
             [jepsen.nemesis.combined :as nc]
             [jepsen.os.debian :as debian]
             [kommander.db :as kdb]
+            [kommander.nemesis.lost-tail :as lost-tail]
             [kommander.nemesis.membership :as membership]
             [kommander.nemesis.skew :as skew]
+            [kommander.storage :as storage]
             [kommander.workload.log-append :as log-append]
             [kommander.workload.register :as register]))
 
@@ -29,7 +31,10 @@
   every container on a host shares one kernel clock, so under Docker it moves
   all nodes together — a cluster-wide jump, never skew between nodes — and it
   moves the host's clock too, which on Docker Desktop means the whole VM. Use
-  it only on separate VMs, where each node really has its own clock."
+  it only on separate VMs, where each node really has its own clock.
+
+  :lost-tail is also NOT included. It damages a disk on purpose, so it runs alone
+  (see `check-fault-combination!`)."
   #{:partition :kill :pause :membership :skew})
 
 (defn parse-faults [s]
@@ -73,12 +78,24 @@
                                     (:by-f result)))))
             result))))))
 
+(defn check-fault-combination!
+  "Refuses a :lost-tail run that cannot answer its question. Any other fault can
+  heal or reshape the network in the middle of the directed sequence. Only
+  log-append takes the final readings that the verdict compares."
+  [workload faults]
+  (when (and (contains? faults :lost-tail)
+             (or (not= #{:lost-tail} faults)
+                 (not= :log-append workload)))
+    (throw (IllegalArgumentException.
+             "--faults lost-tail must run alone, with --workload log-append"))))
+
 (defn kommander-test
   "Builds a test map from CLI options."
   [opts]
   (let [workload-fn (workloads (:workload opts))
         workload    (workload-fn opts)
-        faults      (:faults opts all-faults)
+        faults      (set (:faults opts all-faults))
+        _           (check-fault-combination! (:workload opts) faults)
         db          (kdb/db (:tarball opts))
         nemesis-opts {:db        db
                       :nodes     (:nodes opts)
@@ -99,14 +116,15 @@
                       :pause     {:targets [:one :majority]}
                       :interval  (:nemesis-interval opts 15)
                       :membership-interval (:membership-interval opts 30)}
-        ;; :membership and :skew are ours, not jepsen.nemesis.combined's — it
+        ;; :membership, :skew and :lost-tail are ours, not jepsen.nemesis.combined's — it
         ;; would ignore them silently and the test would run with no such fault
         ;; at all, which is exactly the kind of quiet no-op that reads as a
         ;; clean pass. Composed in explicitly instead.
         nemesis     (nc/compose-packages
                       (conj (nc/nemesis-packages nemesis-opts)
                             (membership/package nemesis-opts)
-                            (skew/package nemesis-opts)))]
+                            (skew/package nemesis-opts)
+                            (lost-tail/package nemesis-opts)))]
     (merge tests/noop-test
            opts
            {:name       (str "kommander-" (name (:workload opts))
@@ -119,6 +137,8 @@
                           {:perf       (checker/perf {:nemeses (:perf nemesis)})
                            :stats      (stats-checker)
                            :exceptions (checker/unhandled-exceptions)
+                           :storage    (storage/checker
+                                         {:damage? (contains? faults :lost-tail)})
                            :workload   (:checker workload)})
             :generator  (gen/phases
                           (->> (:generator workload)

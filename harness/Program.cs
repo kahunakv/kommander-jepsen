@@ -162,6 +162,8 @@ app.MapGet("/health", (IRaft raft) => Results.Ok(new
 
 app.MapGet("/cluster/membership", (Api api) => Results.Ok(api.Membership()));
 
+app.MapGet("/debug/storage", (Api api) => Results.Ok(api.Storage()));
+
 app.MapPost("/kv/read", async (ReadRequest request, Api api, HttpContext ctx) =>
     Results.Ok(await api.Read(request, Forwarded(ctx.Request), ctx.RequestAborted)));
 

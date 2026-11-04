@@ -103,6 +103,14 @@ jobs:
             faults: skew,kill
             concurrency: 10
             ops_per_key: 60
+          # A voter loses acknowledged entries from its disk, then decides an
+          # election. A real file truncation, because the rows and the watermark
+          # share one log (Vorpal a516525b). This job is expected to stay red until
+          # that item is fixed: the storage checker reports the loss as :undetected.
+          - workload: log-append
+            faults: lost-tail
+            concurrency: 10
+            ops_per_key: 60
 
     env:
       KOMMANDER_REPO: ${{ inputs.kommander_repo || 'kahunakv/kommander' }}

@@ -20,6 +20,11 @@
 (def pidfile (str dir "/kommander.pid"))
 (def wal-dir (str dir "/wal"))
 
+(def engine-dir
+  "Where RocksDB keeps its files: --wal-path plus the --wal-revision subdirectory
+  from `start-args`."
+  (str wal-dir "/v1"))
+
 (def raft-port
   "Inter-node Raft traffic (h2c gRPC). Separate from the client API port so a
   partition of this port breaks replication while client connections survive."

@@ -764,7 +764,13 @@
                                   ;; delivery failure and a harness drop.
                                   :undecodable  (vec (:undecodable r))}]))]
           (if (seq results)
-            (assoc op :type :ok :value {:node node :partitions results})
+            (assoc op :type :ok :value {:node node
+                                        :partitions results
+                                        ;; For kommander.storage. A failed read must
+                                        ;; not cost the entries above, and the
+                                        ;; checker counts what it received.
+                                        :storage (try (kc/storage node)
+                                                      (catch Exception _ nil))})
             (assoc op :type :fail :error :no-entries))))))
 
   (teardown! [_ _test])

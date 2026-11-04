@@ -200,6 +200,17 @@
   ([node opts] (get! node "/debug/clock" opts)))
 
 ;; ---------------------------------------------------------------------------
+;; Storage verdicts
+;; ---------------------------------------------------------------------------
+
+(defn storage
+  "Every partition's storage verdict on `node`, with the watermark and log index
+  behind it: {:status :node :failStopReason :partitions [{:partition :state
+  :reason :watermark :logIndex :readError} …]}."
+  ([node] (storage node {:timeout 5000}))
+  ([node opts] (get! node "/debug/storage" opts)))
+
+;; ---------------------------------------------------------------------------
 ;; Cluster
 ;; ---------------------------------------------------------------------------
 

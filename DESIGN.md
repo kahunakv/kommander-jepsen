@@ -267,6 +267,51 @@ on true time. That is a wall-clock correction across a restart, which is the
 case Kommander's persisted HLC floor exists for. `--faults skew,kill` is the
 combination that tests it.
 
+## Storage verdicts are checked in every run
+
+Kommander reports a storage verdict for each partition
+(`IRaft.GetPartitionStorageHealth`). `kommander.storage` fails a run with no disk
+damage if any node reaches a verdict. A false quarantine takes a voter out of
+elections, and the other checkers do not see that.
+
+The check has two sources, because each one misses a case:
+
+- **Node logs.** A quarantine that a repair or a restart cleared is on record
+  only here. The scan depends on Kommander's message text. If the text changes,
+  the scan finds nothing and reports nothing.
+- **`/debug/storage` at the final read.** This does not depend on message text,
+  but it shows only the state at the end of the run. Only `log-append` takes this
+  reading. `:storage-checked` counts the partitions it read, and 0 means this half
+  did nothing.
+
+## The lost-tail fault damages a real file
+
+`--faults lost-tail` is one directed sequence, not a random fault. The docstring
+in `kommander.nemesis.lost-tail` gives the steps. The cluster acknowledges entries
+that only a bare majority holds. The victim in that majority then loses those
+entries from its disk, restarts, and decides an election on the other side.
+
+Kommander's own tests raise the watermark through the API after they remove the
+rows. A real truncation also removes the watermark, because the rows and the
+watermark share one write batch in one log. Only real file damage can test the
+detection. See Vorpal `a516525b`.
+
+Two checkers give separate answers:
+
+- `kommander.storage` answers "did the victim detect the loss?". `:damage` in its
+  verdict lists each partition with a shorter log. `:undetected` is the subset
+  that reported `Healthy`.
+- The log-append checker answers "what did the loss do to acknowledged entries?".
+
+The victim's verdict is read while the victim has no peers, because a peer can
+replicate entries and hide the loss. A run where the victim lost nothing is
+`:unknown`, because the test injected no fault.
+
+The fault runs alone, on `log-append` only, and `all` does not include it. Any
+other fault can heal or reshape the network in the middle of the sequence.
+`--time-limit` must be at least 60 s, or the sequence does not reach the restart
+and the verdict is `:unknown`.
+
 ## Why CI is not a per-PR gate
 
 Jepsen results are nondeterministic, and a slow, contended runner manufactures
