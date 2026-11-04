@@ -105,8 +105,9 @@ jobs:
             ops_per_key: 60
           # A voter loses acknowledged entries from its disk, then decides an
           # election. A real file truncation, because the rows and the watermark
-          # share one log (Vorpal a516525b). This job is expected to stay red until
-          # that item is fixed: the storage checker reports the loss as :undetected.
+          # share one log (Vorpal a516525b). Kommander 1.13.1 and later must pass.
+          # A ref before e2763bc fails: the storage checker reports the loss as
+          # :undetected, and the log-append checker reports overwritten entries.
           - workload: log-append
             faults: lost-tail
             concurrency: 10

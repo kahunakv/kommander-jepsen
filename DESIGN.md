@@ -171,6 +171,13 @@ of patience and proved nothing. Nodes that are silent or still catching up both
 hold the wait open — a silent node cannot produce a false violation, but it is
 one more replica to compare against, and four is a weaker check than five.
 
+A partition that holds a storage verdict also holds the wait open, because a
+replica can catch up before its quarantine lifts. The first `lost-tail` runs on
+Kommander 1.13.1 took the final read about 2 s after the heal and reported a repair
+in progress as a stuck verdict. The victim's repair took up to about 8 s. A verdict
+that remains at the deadline is in `:quarantined`, and it does not change
+`:converged?`.
+
 **A hole is not a truncated tail, and the verdict says which it found.** An
 acknowledged entry missing at an index *below* what the node has already applied
 is a hole: the node moved past that position without ever applying it, and no
@@ -291,10 +298,19 @@ in `kommander.nemesis.lost-tail` gives the steps. The cluster acknowledges entri
 that only a bare majority holds. The victim in that majority then loses those
 entries from its disk, restarts, and decides an election on the other side.
 
-Kommander's own tests raise the watermark through the API after they remove the
-rows. A real truncation also removes the watermark, because the rows and the
-watermark share one write batch in one log. Only real file damage can test the
-detection. See Vorpal `a516525b`.
+A real truncation also removes the watermark, because the rows and the watermark
+share one write batch in one log. Before Kommander 1.13.1 a victim therefore
+reported `Healthy`, voted a second time in the same term, and acknowledged entries
+were overwritten (Vorpal `a516525b`). Kommander's tests at that time raised the
+watermark through the API and did not see this. Only real file damage can test the
+detection. Since 1.13.1 a sync ledger and a hard-state ledger outside the log detect
+the loss and restore the vote. The fault cuts only the log, and it leaves the
+ledgers intact.
+
+After the rejoin, a correct cluster has no leader, because the quarantined victim
+refuses to vote. Zero acknowledged appends in that period are the expected result.
+The nemesis heals in the middle of the run, so clients also write to the repaired
+cluster.
 
 Two checkers give separate answers:
 
@@ -310,7 +326,8 @@ replicate entries and hide the loss. A run where the victim lost nothing is
 The fault runs alone, on `log-append` only, and `all` does not include it. Any
 other fault can heal or reshape the network in the middle of the sequence.
 `--time-limit` must be at least 60 s, or the sequence does not reach the restart
-and the verdict is `:unknown`.
+and the verdict is `:unknown`. Use at least 90 s, so that clients write for some
+time after the heal at about 66 s.
 
 ## Why CI is not a per-PR gate
 

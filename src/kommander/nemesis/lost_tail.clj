@@ -20,14 +20,16 @@
                            safe. A v that votes lets this side elect a leader,
                            commit other entries at those indices, and overwrite
                            the acknowledged entries after the heal.
-    6. :lost-tail-heal     Heal the network.
+    6. :lost-tail-heal     Heal the network in the middle of the run, so clients
+                           write to the repaired cluster. The final generator
+                           heals again, and that is safe.
 
   ## Why a real file truncation
 
-  Kommander's own tests raise the watermark through the API after they remove the
-  rows. A real truncation also removes the watermark, because the rows and the
-  watermark share one write batch in one log. See Vorpal a516525b. This suite has
-  to create the damage that the disk creates.
+  A real truncation also removes the watermark, because the rows and the watermark
+  share one write batch in one log. Only real file damage shows whether a node
+  detects that. See Vorpal a516525b, which this fault found. Only the log is cut,
+  so the ledgers that Kommander 1.13.1 keeps outside the log stay intact.
 
   ## Why the rules change one edge at a time
 
@@ -63,6 +65,11 @@
   "How long the cluster acknowledges entries that the far side does not have. This
   includes the elections for the partitions that lost their leader in step 1."
   20)
+
+(def ^:private rejoined-s
+  "How long {v d e} can act alone. A v that votes uses this time to overwrite the
+  acknowledged entries."
+  30)
 
 (def ^:private verdict-timeout-s
   "How long to wait for a restarted victim to finish its restore."
@@ -224,7 +231,9 @@
                        (gen/sleep window-s)
                        {:type :info, :f :lost-tail-damage}
                        {:type :info, :f :lost-tail-restart}
-                       {:type :info, :f :lost-tail-rejoin}]
+                       {:type :info, :f :lost-tail-rejoin}
+                       (gen/sleep rejoined-s)
+                       {:type :info, :f :lost-tail-heal}]
      :final-generator {:type :info, :f :lost-tail-heal}
      :nemesis         (nemesis)
      :perf            #{{:name  "lost-tail"

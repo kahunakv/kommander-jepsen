@@ -438,6 +438,31 @@
       (is (true? (:converged? r)))
       (is (= 4 (:polls r))))))
 
+(deftest await-waits-for-a-quarantine-to-lift
+  (testing "a replica can catch up before its quarantine lifts, and a read in
+            that gap reports a repair in progress as a stuck verdict"
+    (let [polls (atom 0)
+          held  (fn [] (swap! polls inc)
+                       (if (< @polls 3)
+                         [{:node "n1" :partition 1 :state "LostAcknowledgedEntries"}]
+                         []))
+          r     (la/await-convergence! (constantly {"n1" {1 9}}) ["n1"] {1 9}
+                                       {:recovery-time 60 :poll-interval 0
+                                        :quarantined! held})]
+      (is (true? (:converged? r)))
+      (is (= 3 (:polls r)))
+      (is (empty? (:quarantined r))))))
+
+(deftest a-quarantine-at-the-deadline-is-reported-and-is-not-lag
+  (testing ":converged? still says only that the replicas caught up, so a tail
+            loss in the same run stays readable"
+    (let [stuck [{:node "n1" :partition 1 :state "LostAcknowledgedEntries"}]
+          r     (la/await-convergence! (constantly {"n1" {1 9}}) ["n1"] {1 9}
+                                       {:recovery-time 0 :poll-interval 0
+                                        :quarantined! (constantly stuck)})]
+      (is (true? (:converged? r)))
+      (is (= stuck (:quarantined r))))))
+
 (deftest await-gives-up-at-the-deadline-and-says-so
   (testing "a wait that timed out must be distinguishable from one that
             succeeded, or the tail losses that follow cannot be read"

@@ -35,11 +35,20 @@
    :engine-refused-open       #"refused to open: the storage engine reported corruption"
    :engine-fail-stop          #"fail-stopped on a storage corruption"
    :partition-engine-failed   #"The storage engine fail-stopped"
-   :restore-failed            #"WAL restore \(Phase \d\) failed"})
+   :restore-failed            #"WAL restore \(Phase \d\) failed"
+   :engine-lost-synced-writes #"lost synced writes: the sync ledger"
+   :partition-lost-synced-writes #"Restore found the storage engine lost synced writes"
+   :hard-state-restored       #"restored the hard state of partition \d+ from the hard-state ledger"
+   ;; Warnings, not verdicts. Each one says that a ledger was reset, and the check
+   ;; for lost synced writes then starts over. No crash produces either one.
+   :sync-ledger-foreign       #"belongs to another engine"
+   :sync-ledger-unreadable    #"holds no readable record"})
 
 (def expected-on-victim
   "Correct reactions to the damage, on the damaged node only."
-  #{:lost-acknowledged-entries :engine-refused-open})
+  #{:lost-acknowledged-entries :engine-refused-open
+    :engine-lost-synced-writes :partition-lost-synced-writes
+    :hard-state-restored})
 
 (def ^:private no-verdict-yet
   "States that say nothing yet about the storage."
@@ -60,16 +69,20 @@
           {}
           lines))
 
-(defn- signature-findings
-  "Log matches that no damage in this run explains."
-  [logs victim]
+(defn- explained?
+  "Does the damage in this run explain this match?"
+  [victim {:keys [node signature]}]
+  (and (= node victim) (expected-on-victim signature)))
+
+(defn- signature-matches
+  [logs]
   (vec (for [[node found]                 logs
-             [signature {:keys [count first]}] found
-             :when (not (and (= node victim)
-                             (expected-on-victim signature)))]
+             [signature {:keys [count first]}] found]
          {:node node :signature signature :count count :first-line first})))
 
-(defn- unhealthy-partitions
+(defn unhealthy-partitions
+  "Every partition that holds a storage verdict. `final` is {node /debug/storage
+  response}."
   [final]
   (vec (for [[node response] final
              p               (:partitions response)
@@ -116,7 +129,8 @@
   `damage?` true when this run damages a disk"
   [{:keys [logs final event damage?]}]
   (let [victim      (when damage? (:victim event))
-        found       (signature-findings (remove (comp nil? val) logs) victim)
+        matches     (signature-matches (remove (comp nil? val) logs))
+        found       (vec (remove (partial explained? victim) matches))
         unhealthy   (unhealthy-partitions final)
         fail-stops  (vec (for [[node response] final
                                :when (:failStopReason response)]
@@ -128,6 +142,8 @@
         result      {:logs-scanned    (count (remove (comp nil? val) logs))
                      :logs-missing    (vec (sort (keys (filter (comp nil? val) logs))))
                      :signatures      found
+                     ;; The victim's reaction to the damage. Evidence, not a verdict.
+                     :expected-signatures (filterv (partial explained? victim) matches)
                      ;; 0 means the final-read half of this check did nothing.
                      :storage-checked (reduce + (map (comp count :partitions) (vals final)))
                      :unhealthy       unhealthy

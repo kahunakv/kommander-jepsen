@@ -41,10 +41,25 @@
              :partition-engine-failed
              "crit: [n1:8082/1/Follower] The storage engine fail-stopped: this partition steps down"
              :restore-failed
-             "fail: [RaftPartitionExecutor/1] WAL restore (Phase 2) failed; partition will not process operations"}]
+             "fail: [RaftPartitionExecutor/1] WAL restore (Phase 2) failed; partition will not process operations"
+             :engine-lost-synced-writes
+             "crit: RocksDB WAL at '/opt' lost synced writes: the sync ledger '/opt/.kommander-sync-ledger' attests sequence 9 as durable"
+             :partition-lost-synced-writes
+             "crit: [n1:8082/1] Restore found the storage engine lost synced writes: the surviving log is contiguous through 3"
+             :hard-state-restored
+             "warn: RocksDB WAL at '/opt': restored the hard state of partition 1 from the hard-state ledger (term 2, vote n3)"
+             :sync-ledger-foreign
+             "warn: RocksDB WAL at '/opt': the sync ledger '/opt/l' belongs to another engine (ledger identity a, engine identity b)"
+             :sync-ledger-unreadable
+             "warn: RocksDB WAL at '/opt': the sync ledger '/opt/l' holds no readable record (every written slot fails its checksum"}]
       (is (= {signature {:count 1 :first line}}
              (storage/scan-lines ["info: unrelated" line "info: unrelated"]))
           (str signature)))))
+
+(deftest the-repair-line-is-not-a-verdict
+  (testing "the repair says the same words, and a repair is not a new loss"
+    (is (empty? (storage/scan-lines
+                  ["info: [n1:8082/1] Lost synced writes repaired: a leader reconciled the log"])))))
 
 (deftest the-scan-counts-and-keeps-the-first-line
   (let [found (storage/scan-lines ["WAL restore (Phase 1) failed; one"
@@ -126,6 +141,38 @@
     (is (true? (:valid? r)))
     (is (empty? (-> r :damage :undetected)))
     (is (= 1 (count (-> r :damage :lost))))))
+
+(deftest the-sync-ledger-reaction-is-expected-on-the-victim-and-reported
+  (let [r (storage/check-storage
+            {:damage? true
+             :logs    (assoc clean-logs "n3" {:engine-lost-synced-writes {:count 1 :first "a"}
+                                              :partition-lost-synced-writes {:count 5 :first "b"}
+                                              :hard-state-restored {:count 5 :first "c"}})
+             :final   {"n3" healthy}
+             :event   (event [[0 "LostAcknowledgedEntries" 10 10]
+                              [1 "LostAcknowledgedEntries" 30 30]])})]
+    (is (true? (:valid? r)))
+    (is (empty? (:signatures r)))
+    (is (= 3 (count (:expected-signatures r))))))
+
+(deftest a-lost-synced-writes-line-fails-a-run-with-no-damage
+  (testing "a false alarm from the ledgers is the risk of the fix, and a repair
+            clears the verdict before the final read"
+    (doseq [signature [:engine-lost-synced-writes :partition-lost-synced-writes
+                       :hard-state-restored :sync-ledger-foreign :sync-ledger-unreadable]]
+      (let [r (storage/check-storage
+                {:logs  (assoc clean-logs "n2" {signature {:count 1 :first "the line"}})
+                 :final {"n2" healthy}})]
+        (is (false? (:valid? r)) (str signature))))))
+
+(deftest a-ledger-reset-is-not-excused-on-the-victim
+  (testing "a reset ledger means that the check did not run, so it is not a reaction"
+    (let [r (storage/check-storage
+              {:damage? true
+               :logs    (assoc clean-logs "n3" {:sync-ledger-unreadable {:count 1 :first "x"}})
+               :final   {}
+               :event   (event [[1 "LostAcknowledgedEntries" 50 30]])})]
+      (is (false? (:valid? r))))))
 
 (deftest a-verdict-on-any-other-node-still-fails-a-damage-run
   (testing "the damage explains the victim's line and nothing else"

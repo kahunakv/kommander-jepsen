@@ -79,6 +79,7 @@
                     [client :as client]
                     [generator :as gen]]
             [kommander.client :as kc]
+            [kommander.storage :as storage]
             [slingshot.slingshot :refer [try+]]))
 
 ;; ---------------------------------------------------------------------------
@@ -597,30 +598,42 @@
 
   Timing is `nanoTime`, not `currentTimeMillis`: :clock is an available fault,
   and a deadline that a settimeofday can jump past would abandon the wait at
-  the one moment it matters most."
-  [poll! nodes high-water {:keys [recovery-time poll-interval]
-                           :or   {recovery-time 90, poll-interval 2}}]
+  the one moment it matters most.
+
+  `quarantined!` is a thunk that returns the partitions holding a storage
+  verdict. They hold the wait open too, because a replica can catch up before its
+  quarantine lifts: the first lost-tail runs on Kommander 1.13.1 took the final
+  read about 2 s after the heal, ahead of the repair. They do not change
+  :converged?, which
+  still means only that the replicas caught up. A verdict that remains at the
+  deadline is in :quarantined, and the storage checker fails the run on it."
+  [poll! nodes high-water {:keys [recovery-time poll-interval quarantined!]
+                           :or   {recovery-time 90, poll-interval 2
+                                  quarantined! (constantly [])}}]
   (let [started  (System/nanoTime)
         deadline (+ started (* recovery-time 1000000000))
         elapsed  #(quot (- (System/nanoTime) started) 1000000)]
     (loop [polls 1, first-frontiers nil]
-      (let [fr      (poll!)
-            first-f (or first-frontiers fr)
-            lag     (lagging high-water fr)
-            missing (missing-nodes nodes fr)]
+      (let [fr         (poll!)
+            first-f    (or first-frontiers fr)
+            lag        (lagging high-water fr)
+            missing    (missing-nodes nodes fr)
+            caught-up? (and (empty? lag) (empty? missing))
+            held       (quarantined!)]
         (cond
-          (and (empty? lag) (empty? missing))
+          (and caught-up? (empty? held))
           (do (info "replicas converged after" (elapsed) "ms," polls "polls")
               {:converged? true :waited-ms (elapsed) :polls polls
-               :lagging [] :missing []})
+               :lagging [] :missing [] :quarantined []})
 
           (<= deadline (System/nanoTime))
           (let [lag (with-progress lag first-f)]
             (info "recovery deadline reached;" (count lag)
                   "node/partitions still behind:" lag
-                  "| nodes not answering:" missing)
-            {:converged? false :waited-ms (elapsed) :polls polls
-             :lagging lag :missing missing})
+                  "| nodes not answering:" missing
+                  "| partitions still quarantined:" held)
+            {:converged? caught-up? :waited-ms (elapsed) :polls polls
+             :lagging lag :missing missing :quarantined held})
 
           :else
           ;; Coerced, not merely computed: --poll-interval parses with
@@ -628,6 +641,17 @@
           ;; Thread/sleep has no double overload to receive it.
           (do (Thread/sleep (long (* poll-interval 1000)))
               (recur (inc polls) first-f)))))))
+
+(defn poll-quarantined
+  "Every partition that holds a storage verdict now. A node that cannot be reached
+  is omitted: `missing-nodes` already holds the wait open for it."
+  [nodes]
+  (storage/unhealthy-partitions
+    (into {}
+          (for [node nodes
+                :let [r (try (kc/storage node) (catch Exception _ nil))]
+                :when (= "ok" (:status r))]
+            [node r]))))
 
 (defn poll-frontiers
   "Reads every node's applied frontier for every partition.
@@ -707,7 +731,8 @@
                   :value (await-convergence! #(poll-frontiers (:nodes test) partitions)
                                              (:nodes test)
                                              @acked
-                                             opts))
+                                             (assoc opts :quarantined!
+                                                    #(poll-quarantined (:nodes test)))))
 
         :read-log
         ;; Read every partition from *this* client's node. Each client is bound
