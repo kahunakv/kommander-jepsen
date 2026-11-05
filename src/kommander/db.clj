@@ -21,8 +21,8 @@
 (def wal-dir (str dir "/wal"))
 
 (def engine-dir
-  "Where RocksDB keeps its files: --wal-path plus the --wal-revision subdirectory
-  from `start-args`."
+  "Where the WAL backend keeps its files: --wal-path plus the --wal-revision
+  subdirectory from `start-args`. Both backends name their log files *.log."
   (str wal-dir "/v1"))
 
 (def raft-port
@@ -77,6 +77,7 @@
       :--initial-cluster-partitions (:partitions test 4)
       :--wal-path      wal-dir
       :--wal-revision  :v1
+      :--wal-backend   (name (:wal-backend test :rocksdb))
       :--transport     (name (:transport test :grpc))]
      [:--initial-cluster] (peers test node)
      ;; Durability knob: without fsync a node that is SIGKILLed may lose

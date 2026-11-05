@@ -323,6 +323,14 @@ The victim's verdict is read while the victim has no peers, because a peer can
 replicate entries and hide the loss. A run where the victim lost nothing is
 `:unknown`, because the test injected no fault.
 
+`--wal-backend solarium` runs the same test on `SolariumWAL`. The adapter comes
+from the `SolariumDb.Kommander` package, and the Kommander reference in the harness
+satisfies its dependency, so the adapter runs on the Kommander under test. On an
+adapter with no watermark (0.1.6 and earlier) the storage checker reports
+`:unknown`, because it has no record of what the victim acknowledged. The
+log-append checker still fails that run. Set `SolariumVersion` at build time to
+choose the adapter.
+
 The fault runs alone, on `log-append` only, and `all` does not include it. Any
 other fault can heal or reshape the network in the middle of the sequence.
 `--time-limit` must be at least 60 s, or the sequence does not reach the restart

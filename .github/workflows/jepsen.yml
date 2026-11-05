@@ -112,6 +112,14 @@ jobs:
             faults: lost-tail
             concurrency: 10
             ops_per_key: 60
+          # The same fault on SolariumWAL, which has its own ledgers. The adapter
+          # comes from the SolariumDb.Kommander package, so a new adapter reaches
+          # this job only when the version in the harness project changes.
+          - workload: log-append
+            faults: lost-tail
+            concurrency: 10
+            ops_per_key: 60
+            wal_backend: solarium
 
     env:
       KOMMANDER_REPO: ${{ inputs.kommander_repo || 'kahunakv/kommander' }}
@@ -223,6 +231,7 @@ jobs:
           lein with-profile +ci run test \
             --workload ${{ matrix.workload }} \
             --faults ${{ matrix.faults }} \
+            --wal-backend ${{ matrix.wal_backend || 'rocksdb' }} \
             --nodes n1,n2,n3,n4,n5 \
             --time-limit "$TIME_LIMIT" \
             --rate "$RATE" \

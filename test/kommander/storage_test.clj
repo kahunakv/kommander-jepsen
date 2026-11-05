@@ -56,6 +56,30 @@
              (storage/scan-lines ["info: unrelated" line "info: unrelated"]))
           (str signature)))))
 
+(deftest the-scan-finds-each-verdict-in-solariums-own-words
+  (testing "the engine lines of SolariumWAL differ from RocksDbWAL. The partition
+            lines come from Kommander and are the same"
+    (doseq [[signature line]
+            {:engine-lost-synced-writes
+             "crit: Solarium WAL at '/opt' lost synced writes: the sync ledger '/opt/l' attests sequence 9, the database replayed through 3"
+             :engine-refused-open
+             "crit: Solarium WAL at '/opt' refuses to open on storage damage: bad block. Move the directory aside"
+             :engine-fail-stop
+             "crit: Solarium WAL at '/opt' is fail-stopped on storage damage: bad block. Writes are refused"
+             :hard-state-restored
+             "warn: Solarium WAL at '/opt' restored the hard state of partition 1 from the hard-state ledger: term 2, vote 'n3'"
+             :sync-ledger-foreign
+             "warn: Solarium WAL at '/opt': the sync ledger '/opt/l' belongs to another database (a, this one is b); it is reset"
+             :sync-ledger-unreadable
+             "warn: Solarium WAL at '/opt': no slot of the sync ledger '/opt/l' passes its checksum, which no crash leaves; it is started over"}]
+      (is (= {signature {:count 1 :first line}} (storage/scan-lines [line]))
+          (str signature)))))
+
+(deftest the-ledger-creation-line-is-not-a-verdict
+  (is (empty? (storage/scan-lines
+                ["info: Solarium WAL at '/opt': created the sync ledger '/opt/l' at sequence 0"
+                 "info: RocksDB WAL at '/opt': created the sync ledger '/opt/l' attesting sequence 0"]))))
+
 (deftest the-repair-line-is-not-a-verdict
   (testing "the repair says the same words, and a repair is not a new loss"
     (is (empty? (storage/scan-lines

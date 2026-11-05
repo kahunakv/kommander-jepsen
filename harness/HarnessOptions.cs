@@ -37,6 +37,13 @@ public sealed class HarnessOptions
     public string WalRevision { get; set; } = "v1";
 
     /// <summary>
+    /// rocksdb (default, <c>RocksDbWAL</c>) or solarium (<c>SolariumWAL</c>). The Raft layer and every
+    /// check are the same, so a difference between the two is a difference in the storage backend.
+    /// </summary>
+    [Option("wal-backend", Required = false, HelpText = "WAL backend: rocksdb or solarium", Default = "rocksdb")]
+    public string WalBackend { get; set; } = "rocksdb";
+
+    /// <summary>
     /// Whether the WAL fsyncs before acknowledging. Left on by default: a node
     /// SIGKILLed without an fsynced WAL may legitimately lose acknowledged
     /// writes, and a run that finds that has found a fact about this flag, not

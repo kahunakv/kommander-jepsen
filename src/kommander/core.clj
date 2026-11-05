@@ -128,7 +128,10 @@
     (merge tests/noop-test
            opts
            {:name       (str "kommander-" (name (:workload opts))
-                             "-" (str/join "," (map name (sort faults))))
+                             "-" (str/join "," (map name (sort faults)))
+                             ;; Results of the two backends must not share a
+                             ;; store directory. The default name stays as it was.
+                             (when (= :solarium (:wal-backend opts)) "-solarium"))
             :os         debian/os
             :db         db
             :client     (:client workload)
@@ -236,6 +239,12 @@
     :default :grpc
     :parse-fn keyword
     :validate [#{:grpc :rest} "must be grpc or rest"]]
+
+   [nil "--wal-backend NAME" "WAL backend: rocksdb (default, RocksDbWAL) or solarium
+                             (SolariumWAL)."
+    :default :rocksdb
+    :parse-fn keyword
+    :validate [#{:rocksdb :solarium} "must be rocksdb or solarium"]]
 
    [nil "--disable-wal-sync-writes" "Run without WAL fsync (expect data loss on kill)"
     :default false]

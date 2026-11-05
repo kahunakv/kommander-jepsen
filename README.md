@@ -70,6 +70,7 @@ for:
 | `--time-limit` | seconds of load |
 | `--recovery-time` | deadline (seconds) on the wait for replicas to catch up after healing; the wait ends as soon as they do |
 | `--poll-interval` | seconds between frontier polls during that wait |
+| `--wal-backend` | `rocksdb` (default, `RocksDbWAL`) or `solarium` (`SolariumWAL` from the `SolariumDb.Kommander` package) |
 | `--disable-wal-sync-writes` | run without WAL fsync (expect data loss on kill) |
 
 Run `lein test` for the unit tests — negative controls proving the log-append

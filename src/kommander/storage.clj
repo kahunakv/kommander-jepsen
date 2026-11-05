@@ -29,11 +29,12 @@
 
 (def signatures
   "One pattern per verdict, from Kommander's `RaftLoggerExtensions` and
-  `RaftPartitionExecutor`."
+  `RaftPartitionExecutor`, and from `SolariumWAL`, whose engine lines use their own
+  words."
   {:lost-acknowledged-entries #"Restore found acknowledged entries missing"
    :application-floor         #"The application's durable floor \S+ is below"
-   :engine-refused-open       #"refused to open: the storage engine reported corruption"
-   :engine-fail-stop          #"fail-stopped on a storage corruption"
+   :engine-refused-open       #"refused to open: the storage engine reported corruption|refuses to open on storage damage"
+   :engine-fail-stop          #"fail-stopped on a storage corruption|is fail-stopped on storage damage"
    :partition-engine-failed   #"The storage engine fail-stopped"
    :restore-failed            #"WAL restore \(Phase \d\) failed"
    :engine-lost-synced-writes #"lost synced writes: the sync ledger"
@@ -41,8 +42,8 @@
    :hard-state-restored       #"restored the hard state of partition \d+ from the hard-state ledger"
    ;; Warnings, not verdicts. Each one says that a ledger was reset, and the check
    ;; for lost synced writes then starts over. No crash produces either one.
-   :sync-ledger-foreign       #"belongs to another engine"
-   :sync-ledger-unreadable    #"holds no readable record"})
+   :sync-ledger-foreign       #"belongs to another (engine|database)"
+   :sync-ledger-unreadable    #"holds no readable record|no slot of the sync ledger .* passes its checksum"})
 
 (def expected-on-victim
   "Correct reactions to the damage, on the damaged node only."

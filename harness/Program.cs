@@ -10,6 +10,7 @@ using Kommander.Time;
 using Kommander.WAL;
 using KommanderJepsen.Harness;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Solarium.Kommander;
 
 ParserResult<HarnessOptions> parsed = Parser.Default.ParseArguments<HarnessOptions>(args);
 
@@ -22,6 +23,12 @@ List<RaftNode> peers = (opts.InitialCluster ?? []).Select(e => new RaftNode(e)).
 if (peers.Count < 1)
 {
     Console.Error.WriteLine("--initial-cluster must list at least one peer (this node excluded)");
+    return 1;
+}
+
+if (opts.WalBackend is not ("rocksdb" or "solarium"))
+{
+    Console.Error.WriteLine($"--wal-backend must be rocksdb or solarium, not '{opts.WalBackend}'");
     return 1;
 }
 
@@ -92,14 +99,18 @@ builder.Services.AddSingleton<IRaft>(services =>
         ? new RestCommunication()
         : new GrpcCommunication();
 
-    RaftManager manager = new(
-        configuration,
-        new StaticDiscovery(peers),
-        new RocksDbWAL(
+    IWAL wal = opts.WalBackend == "solarium"
+        ? new SolariumWAL(opts.WalPath, opts.WalRevision, logger, syncWrites: !opts.DisableWalSyncWrites)
+        : new RocksDbWAL(
             path: opts.WalPath,
             revision: opts.WalRevision,
             logger,
-            syncWrites: !opts.DisableWalSyncWrites),
+            syncWrites: !opts.DisableWalSyncWrites);
+
+    RaftManager manager = new(
+        configuration,
+        new StaticDiscovery(peers),
+        wal,
         communication,
         new HybridLogicalClock(skewedClock is null ? null : skewedClock.NowMs),
         logger
@@ -203,8 +214,8 @@ static ClockState DescribeClock(SkewedClock clock, IRaft raft)
     return state;
 }
 
-Console.WriteLine("Kommander Jepsen harness: raft={0}:{1} http={2} partitions={3} transport={4} clock-skew={5}",
-    configuration.Host, configuration.Port, opts.HttpPort, configuration.InitialPartitions, opts.Transport, opts.EnableClockSkew);
+Console.WriteLine("Kommander Jepsen harness: raft={0}:{1} http={2} partitions={3} transport={4} clock-skew={5} wal-backend={6}",
+    configuration.Host, configuration.Port, opts.HttpPort, configuration.InitialPartitions, opts.Transport, opts.EnableClockSkew, opts.WalBackend);
 
 await app.RunAsync();
 
