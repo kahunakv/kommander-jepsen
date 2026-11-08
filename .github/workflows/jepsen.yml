@@ -253,15 +253,28 @@ jobs:
         # A wedged partition does not reliably turn a run red on its own. Run
         # 32690955741 only went red because the stats checker found an :f with
         # zero :ok ops; a wedge that clears after thirty seconds passes the
-        # checkers, and the signature then sits unread in the artifact. Both
+        # checkers, and the signature then sits unread in the artifact. The
         # messages come from the promotion drain: the node hits a WAL hole, it
         # refuses the promotion, and it reverts to Follower. While that repeats,
         # the partition has no leader and every client operation gets no-leader.
         # Baseline is 0 in every green job checked (both workloads, all fault
         # modes) and 0 in the red membership job of run 32618187175, so the
-        # patterns do not fire on ordinary churn or on unrelated failures. Any
-        # hit is real. This runs on failure too: when the test step is already
-        # red, the counts say whether THIS is the reason.
+        # patterns do not fire on ordinary churn or on unrelated failures. This
+        # runs on failure too: when the test step is already red, the counts say
+        # whether THIS is the reason.
+        #
+        # A single refusal is not a wedge. Since Kommander 201b49e (2026-08-29)
+        # a node that wins an election with a WAL hole refuses the promotion,
+        # reverts to Follower, and leaves the term to a voter with a complete
+        # log, which then backfills the hole; the refusal line carries the
+        # attempt as "(N/M, ..." and N resets when the hole changes. Run
+        # 42517820826 (register/pause) showed that path working: one refusal on
+        # n1, n5 leader two seconds later, every checker green, and the old
+        # any-hit rule turned the job red. The wedge pattern therefore matches
+        # the second and later refusal of the same hole, the drain-hole message,
+        # and the two lines that mean self-repair gave up: the orphaned-tail
+        # truncation and a hole that re-opened after it. First refusals are
+        # counted and printed, but do not fail the step.
         if: always()
         run: |
           set -uo pipefail
@@ -273,8 +286,14 @@ jobs:
 
           # -r, not -R: store/latest and store/current are symlinks to the
           # timestamped run directory, and -R would count every hit twice.
-          hits="$(grep -rIcE 'Inherited-entry drain found a WAL hole|Promotion refused' \
-                    --include=kommander.log store/ 2>/dev/null | grep -v ':0$' || true)"
+          wedge='Promotion refused \(([2-9]|[1-9][0-9]+)/|Inherited-entry drain found a WAL hole|truncating the orphaned tail|WAL hole re-opened after truncation'
+          hits="$(grep -rIcE "$wedge" --include=kommander.log store/ 2>/dev/null | grep -v ':0$' || true)"
+          firsts="$(grep -rIcE 'Promotion refused \(1/' --include=kommander.log store/ 2>/dev/null | grep -v ':0$' || true)"
+
+          if [ -n "$firsts" ]; then
+            echo "First promotion refusals per node log (a node with a WAL hole stood down once; designed self-repair, not a wedge):"
+            echo "$firsts"
+          fi
 
           if [ -z "$hits" ]; then
             echo "No promotion-drain wedge signature in the node logs."
@@ -286,15 +305,15 @@ jobs:
           {
             echo "### Promotion-drain wedge detected"
             echo
-            echo "Matches per node log (\`WAL hole\` / \`Promotion refused\`):"
+            echo "Matches per node log (repeated \`Promotion refused\` of one hole, drain \`WAL hole\`, orphaned-tail truncation, hole re-opened):"
             echo
             echo '```'
             echo "$hits"
             echo '```'
             echo
-            echo "A node won the election, hit a WAL hole in the promotion drain,"
-            echo "and reverted to Follower. Download the \`jepsen-*\` artifact and"
-            echo "read the node logs."
+            echo "A node kept winning elections with a WAL hole and kept refusing the"
+            echo "promotion, or gave up and truncated its tail. Download the \`jepsen-*\`"
+            echo "artifact and read the node logs."
           } >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
