@@ -120,8 +120,22 @@
         ;; would ignore them silently and the test would run with no such fault
         ;; at all, which is exactly the kind of quiet no-op that reads as a
         ;; clean pass. Composed in explicitly instead.
+        ;;
+        ;; The library packages are listed one by one, not taken from
+        ;; nc/nemesis-packages. That list also carries the file-corruption
+        ;; package, whose nemesis is built whether or not :file-corruption is in
+        ;; :faults — the flag gates only its generator — and whose setup!
+        ;; downloads the bitflip binary from GitHub releases onto every node.
+        ;; This suite never uses that fault, yet every job paid for the
+        ;; download. On 2026-11-08 a GitHub incident (502 on release downloads,
+        ;; 10:36–12:32 UTC) crashed five of thirteen jobs of run 42473906012 in
+        ;; nemesis setup, before any load ran. wget exits 8 on an HTTP error and
+        ;; does not retry it, so one bad response ends the job.
         nemesis     (nc/compose-packages
-                      (conj (nc/nemesis-packages nemesis-opts)
+                      (conj [(nc/partition-package nemesis-opts)
+                             (nc/packet-package nemesis-opts)
+                             (nc/clock-package nemesis-opts)
+                             (nc/db-package nemesis-opts)]
                             (membership/package nemesis-opts)
                             (skew/package nemesis-opts)
                             (lost-tail/package nemesis-opts)))]
