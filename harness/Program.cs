@@ -204,6 +204,25 @@ static ClockState DescribeClock(SkewedClock clock, IRaft raft)
 Console.WriteLine("Kommander Jepsen harness: raft={0}:{1} http={2} partitions={3} transport={4} clock-skew={5}",
     configuration.Host, configuration.Port, opts.HttpPort, configuration.InitialPartitions, opts.Transport, opts.EnableClockSkew);
 
+// Reports the WAL scheduler's batch counters every few seconds, so a run can show how many engine
+// writes were synced and how many commit-marker batches were held back to ride a later write. The
+// counter of held batches is read by name: a Kommander build that has no such counter reports -1,
+// and the harness still builds against it.
+_ = Task.Run(async () =>
+{
+    System.Reflection.PropertyInfo? deferredMarkers =
+        typeof(Kommander.WAL.IO.FairWalScheduler).GetProperty("TotalMarkerBatchesDeferred");
+
+    while (!app.Lifetime.ApplicationStopping.IsCancellationRequested)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(5));
+
+        if (app.Services.GetRequiredService<IRaft>().WalScheduler is Kommander.WAL.IO.FairWalScheduler wal)
+            Console.WriteLine("wal-stats batches={0} sync={1} deferred-markers={2}",
+                wal.TotalBatchesWritten, wal.TotalSyncBatchesWritten, deferredMarkers?.GetValue(wal) ?? -1L);
+    }
+});
+
 await app.RunAsync();
 
 return 0;
