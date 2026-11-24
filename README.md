@@ -62,7 +62,7 @@ for:
 | Flag | Meaning |
 |---|---|
 | `--workload` | `register` or `log-append` |
-| `--faults` | comma-separated `partition,kill,pause,membership,skew,clock`, or `all` (`clock` excluded; see DESIGN.md) |
+| `--faults` | comma-separated `partition,kill,pause,membership,skew,clock`, or `all` (`clock` excluded; see DESIGN.md). `lost-tail` damages a disk and runs alone, on `log-append` only |
 | `--partitions` | Raft partitions (independent Raft groups) per cluster |
 | `--transport` | `grpc` (default, the production path) or `rest` |
 | `--concurrency` | total client threads; **must** be an exact multiple of `--concurrency-per-key` |
@@ -70,6 +70,7 @@ for:
 | `--time-limit` | seconds of load |
 | `--recovery-time` | deadline (seconds) on the wait for replicas to catch up after healing; the wait ends as soon as they do |
 | `--poll-interval` | seconds between frontier polls during that wait |
+| `--wal-backend` | `rocksdb` (default, `RocksDbWAL`) or `solarium` (`SolariumWAL` from the `SolariumDb.Kommander` package) |
 | `--disable-wal-sync-writes` | run without WAL fsync (expect data loss on kill) |
 
 Run `lein test` for the unit tests — negative controls proving the log-append

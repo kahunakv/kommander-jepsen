@@ -171,6 +171,13 @@ of patience and proved nothing. Nodes that are silent or still catching up both
 hold the wait open — a silent node cannot produce a false violation, but it is
 one more replica to compare against, and four is a weaker check than five.
 
+A partition that holds a storage verdict also holds the wait open, because a
+replica can catch up before its quarantine lifts. The first `lost-tail` runs on
+Kommander 1.13.1 took the final read about 2 s after the heal and reported a repair
+in progress as a stuck verdict. The victim's repair took up to about 8 s. A verdict
+that remains at the deadline is in `:quarantined`, and it does not change
+`:converged?`.
+
 **A hole is not a truncated tail, and the verdict says which it found.** An
 acknowledged entry missing at an index *below* what the node has already applied
 is a hole: the node moved past that position without ever applying it, and no
@@ -266,6 +273,69 @@ The offset lives in the harness process, so a node killed while skewed restarts
 on true time. That is a wall-clock correction across a restart, which is the
 case Kommander's persisted HLC floor exists for. `--faults skew,kill` is the
 combination that tests it.
+
+## Storage verdicts are checked in every run
+
+Kommander reports a storage verdict for each partition
+(`IRaft.GetPartitionStorageHealth`). `kommander.storage` fails a run with no disk
+damage if any node reaches a verdict. A false quarantine takes a voter out of
+elections, and the other checkers do not see that.
+
+The check has two sources, because each one misses a case:
+
+- **Node logs.** A quarantine that a repair or a restart cleared is on record
+  only here. The scan depends on Kommander's message text. If the text changes,
+  the scan finds nothing and reports nothing.
+- **`/debug/storage` at the final read.** This does not depend on message text,
+  but it shows only the state at the end of the run. Only `log-append` takes this
+  reading. `:storage-checked` counts the partitions it read, and 0 means this half
+  did nothing.
+
+## The lost-tail fault damages a real file
+
+`--faults lost-tail` is one directed sequence, not a random fault. The docstring
+in `kommander.nemesis.lost-tail` gives the steps. The cluster acknowledges entries
+that only a bare majority holds. The victim in that majority then loses those
+entries from its disk, restarts, and decides an election on the other side.
+
+A real truncation also removes the watermark, because the rows and the watermark
+share one write batch in one log. Before Kommander 1.13.1 a victim therefore
+reported `Healthy`, voted a second time in the same term, and acknowledged entries
+were overwritten (Vorpal `a516525b`). Kommander's tests at that time raised the
+watermark through the API and did not see this. Only real file damage can test the
+detection. Since 1.13.1 a sync ledger and a hard-state ledger outside the log detect
+the loss and restore the vote. The fault cuts only the log, and it leaves the
+ledgers intact.
+
+After the rejoin, a correct cluster has no leader, because the quarantined victim
+refuses to vote. Zero acknowledged appends in that period are the expected result.
+The nemesis heals in the middle of the run, so clients also write to the repaired
+cluster.
+
+Two checkers give separate answers:
+
+- `kommander.storage` answers "did the victim detect the loss?". `:damage` in its
+  verdict lists each partition with a shorter log. `:undetected` is the subset
+  that reported `Healthy`.
+- The log-append checker answers "what did the loss do to acknowledged entries?".
+
+The victim's verdict is read while the victim has no peers, because a peer can
+replicate entries and hide the loss. A run where the victim lost nothing is
+`:unknown`, because the test injected no fault.
+
+`--wal-backend solarium` runs the same test on `SolariumWAL`. The adapter comes
+from the `SolariumDb.Kommander` package, and the Kommander reference in the harness
+satisfies its dependency, so the adapter runs on the Kommander under test. On an
+adapter with no watermark (0.1.6 and earlier) the storage checker reports
+`:unknown`, because it has no record of what the victim acknowledged. The
+log-append checker still fails that run. Set `SolariumVersion` at build time to
+choose the adapter.
+
+The fault runs alone, on `log-append` only, and `all` does not include it. Any
+other fault can heal or reshape the network in the middle of the sequence.
+`--time-limit` must be at least 60 s, or the sequence does not reach the restart
+and the verdict is `:unknown`. Use at least 90 s, so that clients write for some
+time after the heal at about 66 s.
 
 ## Why CI is not a per-PR gate
 

@@ -229,6 +229,53 @@ public sealed class MemberDto
 /// The client API the Jepsen workloads drive: a linearizable register over the
 /// replicated key/value state machine, and a raw per-partition log append.
 /// </summary>
+/// <summary>
+/// One partition's storage verdict and the two numbers it turns on. <c>Watermark</c> and
+/// <c>LogIndex</c> are reported for every verdict, not only for a quarantine: a node that lost
+/// acknowledged entries and reports <c>Healthy</c> is exactly what the lost-tail test looks for, and
+/// its verdict alone cannot show that.
+/// </summary>
+public sealed class PartitionStorageDto
+{
+    [JsonPropertyName("partition")]
+    public int Partition { get; set; }
+
+    /// <summary>A <see cref="RaftPartitionStorageState"/> name, or <c>not-hosted</c>.</summary>
+    [JsonPropertyName("state")]
+    public string State { get; set; } = "";
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; set; }
+
+    /// <summary>The persisted acknowledged-presence watermark, or -1 when there is none.</summary>
+    [JsonPropertyName("watermark")]
+    public long Watermark { get; set; } = -1;
+
+    /// <summary>The highest log id the WAL holds, or -1 when the read failed.</summary>
+    [JsonPropertyName("logIndex")]
+    public long LogIndex { get; set; } = -1;
+
+    /// <summary>The exception type when a WAL read failed. A damaged engine can throw here.</summary>
+    [JsonPropertyName("readError")]
+    public string? ReadError { get; set; }
+}
+
+public sealed class StorageResponse
+{
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "ok";
+
+    [JsonPropertyName("node")]
+    public string? Node { get; set; }
+
+    /// <summary>The engine's message when it fail-stopped on a <c>Corruption</c> status.</summary>
+    [JsonPropertyName("failStopReason")]
+    public string? FailStopReason { get; set; }
+
+    [JsonPropertyName("partitions")]
+    public List<PartitionStorageDto> Partitions { get; set; } = [];
+}
+
 public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHttpClientFactory clients, ILogger<Api> logger)
 {
     /// <summary>Marks a request that a peer already forwarded, so forwarding never loops.</summary>
@@ -732,6 +779,46 @@ public sealed class Api(IRaft raft, StateMachine sm, HarnessOptions options, IHt
                 NodeId = m.NodeId,
                 Role = m.Role.ToString()
             });
+
+        return response;
+    }
+
+    /// <summary>
+    /// Every partition's storage verdict on this node, system partition included. Read-only, so it
+    /// is served without a start flag. A failed WAL read is reported, not thrown: this endpoint exists
+    /// to describe a damaged node.
+    /// </summary>
+    public StorageResponse Storage()
+    {
+        StorageResponse response = new()
+        {
+            Node = raft.GetLocalNodeName(),
+            FailStopReason = raft.WalAdapter.GetFailStopReason()
+        };
+
+        for (int partition = 0; partition <= options.InitialClusterPartitions; partition++)
+        {
+            RaftPartitionStorageHealth? health = raft.GetPartitionStorageHealth(partition);
+
+            PartitionStorageDto dto = new()
+            {
+                Partition = partition,
+                State = health?.State.ToString() ?? "not-hosted",
+                Reason = health?.Reason
+            };
+
+            try
+            {
+                dto.Watermark = raft.WalAdapter.GetAcknowledgedPresence(partition);
+                dto.LogIndex = raft.WalAdapter.GetMaxLog(partition);
+            }
+            catch (Exception ex)
+            {
+                dto.ReadError = ex.GetType().Name;
+            }
+
+            response.Partitions.Add(dto);
+        }
 
         return response;
     }

@@ -1,4 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
+    <PropertyGroup>
+        <SolariumVersion Condition="'$(SolariumVersion)' == ''">0.1.7</SolariumVersion>
+    </PropertyGroup>
+
 
     <PropertyGroup>
         <TargetFramework>net10.0</TargetFramework>
@@ -26,6 +30,10 @@
 
     <ItemGroup>
         <PackageReference Include="CommandLineParser" Version="2.9.1" />
+        <!-- The SolariumWAL backend, for the wal-backend option solarium. A package, unlike Kommander: the
+             Kommander reference below satisfies its dependency, so the adapter runs on the Kommander
+             under test. Set SolariumVersion to build another adapter, for a negative control. -->
+        <PackageReference Include="SolariumDb.Kommander" Version="$(SolariumVersion)" />
     </ItemGroup>
 
     <ItemGroup>
