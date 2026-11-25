@@ -180,12 +180,31 @@ jobs:
         # it. graphviz is used by the timeline/graph renderers.
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gnuplot graphviz
 
-      - name: Install Leiningen
+      - name: Download the lein script
+        id: lein-script
+        # The script names the jar version, so its hash is the cache key below:
+        # a new stable release changes the hash and saves a new cache.
         run: |
-          sudo curl -fsSL -o /usr/local/bin/lein \
+          sudo curl -fsSL --retry 5 --retry-all-errors -o /usr/local/bin/lein \
             https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein
           sudo chmod +x /usr/local/bin/lein
-          lein version
+          echo "sha=$(sha256sum /usr/local/bin/lein | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the Leiningen jar
+        uses: actions/cache@v5
+        with:
+          path: ~/.lein/self-installs
+          key: lein-${{ steps.lein-script.outputs.sha }}
+
+      - name: Install Leiningen
+        # On a cache miss lein downloads its jar from GitHub Releases, which
+        # sometimes refuses one job of the matrix with a 403. Retry it.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            lein version && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            sleep $((attempt * 10))
+          done
 
       - name: Unit-test the checkers
         # Negative controls. If these stop failing on injected violations, every
